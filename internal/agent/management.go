@@ -4,9 +4,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"io"
-	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -373,76 +372,17 @@ type managementCheckResult struct {
 }
 
 func checkManagementController(cfg Config) managementCheckResult {
-	result := managementCheckResult{OK: true}
-	raw := strings.TrimSpace(cfg.ControllerURL)
-	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
-		return managementCheckResult{Items: []managementCheckItem{{Name: "主控地址", Message: "Agent 配置中没有有效的主控地址"}}}
+	if err := cfg.validateAgentLink(); err != nil {
+		return managementCheckResult{Items: []managementCheckItem{{Name: "AgentLink", Message: "专用地址或证书指纹未配置；请完成 AgentLink 升级或重新获取安装命令"}}}
 	}
-	result.Items = append(result.Items, managementCheckItem{Name: "主控地址", OK: true, Message: displayControllerURL(raw)})
-
-	dnsCtx, cancelDNS := context.WithTimeout(context.Background(), 5*time.Second)
-	addresses, dnsErr := net.DefaultResolver.LookupHost(dnsCtx, u.Hostname())
-	cancelDNS()
-	if dnsErr != nil {
-		result.OK = false
-		result.Items = append(result.Items, managementCheckItem{Name: "域名解析", Message: friendlyCommandError(dnsErr)})
-	} else {
-		result.Items = append(result.Items, managementCheckItem{Name: "域名解析", OK: true, Message: strings.Join(addresses, ", ")})
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	link, err := agentlink.Dial(ctx, agentlink.ClientConfig{Address: cfg.ControllerAddr, CertSHA256: cfg.ControllerCertSHA256, AgentID: cfg.AgentID, Token: cfg.AgentToken, Purpose: "rpc"})
+	if err != nil {
+		return managementCheckResult{Items: []managementCheckItem{{Name: "AgentLink", Message: friendlyCommandError(err)}}}
 	}
-
-	port := u.Port()
-	if port == "" {
-		if u.Scheme == "https" || u.Scheme == "wss" {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	conn, tcpErr := net.DialTimeout("tcp", net.JoinHostPort(u.Hostname(), port), 5*time.Second)
-	if tcpErr != nil {
-		result.OK = false
-		result.Items = append(result.Items, managementCheckItem{Name: "网络连接", Message: friendlyCommandError(tcpErr)})
-	} else {
-		_ = conn.Close()
-		result.Items = append(result.Items, managementCheckItem{Name: "网络连接", OK: true, Message: "已连接到 " + net.JoinHostPort(u.Hostname(), port)})
-	}
-
-	healthURL := *u
-	if healthURL.Scheme == "ws" {
-		healthURL.Scheme = "http"
-	} else if healthURL.Scheme == "wss" {
-		healthURL.Scheme = "https"
-	}
-	// The controller answers 404 outside its base path, so keep the configured
-	// prefix instead of probing the host root.
-	healthURL.Path = strings.TrimRight(healthURL.Path, "/") + "/healthz"
-	healthURL.RawPath = ""
-	healthURL.RawQuery = ""
-	healthURL.Fragment = ""
-	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancelHTTP()
-	req, reqErr := http.NewRequestWithContext(httpCtx, http.MethodGet, healthURL.String(), nil)
-	if reqErr != nil {
-		result.OK = false
-		result.Items = append(result.Items, managementCheckItem{Name: "主控服务", Message: friendlyCommandError(reqErr)})
-		return result
-	}
-	client := &http.Client{Timeout: 8 * time.Second}
-	resp, httpErr := client.Do(req)
-	if httpErr != nil {
-		result.OK = false
-		result.Items = append(result.Items, managementCheckItem{Name: "主控服务", Message: friendlyCommandError(httpErr)})
-	} else {
-		_ = resp.Body.Close()
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			result.Items = append(result.Items, managementCheckItem{Name: "主控服务", OK: true, Message: "健康检查正常"})
-		} else {
-			result.OK = false
-			result.Items = append(result.Items, managementCheckItem{Name: "主控服务", Message: "主控返回 " + resp.Status})
-		}
-	}
-	return result
+	_ = link.Close()
+	return managementCheckResult{OK: true, Items: []managementCheckItem{{Name: "AgentLink", OK: true, Message: "已验证专用地址、证书指纹与 Agent 身份：" + cfg.ControllerAddr}}}
 }
 
 func loadManagementConfig(defaultPath, configPath, keyPath string) (string, Config) {

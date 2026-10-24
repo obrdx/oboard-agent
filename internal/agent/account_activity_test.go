@@ -69,7 +69,7 @@ func TestAccountActivityDurableBeforeACKAndRestart(t *testing.T) {
 	}))
 	defer controller.Close()
 	makeRunner := func() *Runner {
-		r := New(Config{StateDir: dir, ConnectionAuditEnabled: true, ControllerURL: controller.URL + "/base", AllowInsecureController: true, AgentToken: "test-token"})
+		r := newTestRunner(t, Config{StateDir: dir, ConnectionAuditEnabled: true, ControllerURL: controller.URL + "/base", AllowInsecureController: true, AgentToken: "test-token"})
 		r.connectionAudit = nil
 		r.coreClient = &http.Client{Transport: roundTripFunc(func(q *http.Request) (*http.Response, error) {
 			q.URL.Scheme = "http"
@@ -98,7 +98,7 @@ func TestAccountActivityDurableBeforeACKAndRestart(t *testing.T) {
 	}
 }
 func TestAccountActivityCapacityNeverACKsUnpersistedReport(t *testing.T) {
-	r := New(Config{StateDir: t.TempDir(), ConnectionAuditEnabled: true, ControllerURL: "https://controller.invalid"})
+	r := newTestRunner(t, Config{StateDir: t.TempDir(), ConnectionAuditEnabled: true, ControllerURL: "https://controller.invalid"})
 	r.connectionAudit = nil
 	pending := make([]auditwire.Report, auditwire.MaxPending)
 	for i := range pending {
@@ -142,7 +142,7 @@ func TestAccountActivityDisabledDoesNotPoll(t *testing.T) {
 }
 
 func TestAccountActivityRestartPreservesPreviousBootPending(t *testing.T) {
-	r := New(Config{StateDir: t.TempDir(), ConnectionAuditEnabled: true, ControllerURL: "https://controller.invalid"})
+	r := newTestRunner(t, Config{StateDir: t.TempDir(), ConnectionAuditEnabled: true, ControllerURL: "https://controller.invalid"})
 	r.connectionAudit = nil
 	old := auditwire.Report{CollectorBootID: "0123456789abcdef0123456789abcdef", CollectorStartedAt: time.Unix(600, 0).UnixNano(), StreamType: "kernel", Sequence: 1, MinuteUnix: 600, Items: []auditwire.Item{}}
 	next := old

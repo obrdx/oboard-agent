@@ -29,7 +29,7 @@ func testSSHInboundUser(id int64, username, password string) model.SSHInboundUse
 
 func newTestSSHRunner(t *testing.T, cfg Config) *Runner {
 	t.Helper()
-	runner := New(cfg)
+	runner := newTestRunner(t, cfg)
 	now := time.Now().UTC()
 	if err := runner.authorizationState().Update(&model.AuthorizationLease{Revision: 1, IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"0123456789abcdef0123456789abcdef": now.Add(5 * time.Minute).Format(time.RFC3339Nano)}}); err != nil {
 		t.Fatal(err)

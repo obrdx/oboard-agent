@@ -108,7 +108,7 @@ func TestAccountActivitySharedContract(t *testing.T) {
 				w.Write(vector.Body)
 			}))
 			defer controller.Close()
-			r := New(Config{StateDir: t.TempDir(), ConnectionAuditEnabled: true, ControllerURL: controller.URL + "/base", AllowInsecureController: true, AgentToken: "contract-token"})
+			r := newTestRunner(t, Config{StateDir: t.TempDir(), ConnectionAuditEnabled: true, ControllerURL: controller.URL + "/base", AllowInsecureController: true, AgentToken: "contract-token"})
 			r.connectionAudit = nil
 			r.coreClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				if req.URL.Path == "/activity/clock" {

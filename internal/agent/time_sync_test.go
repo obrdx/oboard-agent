@@ -179,7 +179,7 @@ func TestTimeCheckConfigFailureAndRecovery(t *testing.T) {
 			if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
 				t.Fatal(err)
 			}
-			runner := New(cfg)
+			runner := newTestRunner(t, cfg)
 			previousSave := saveTimeCorrectionConfig
 			t.Cleanup(func() { saveTimeCorrectionConfig = previousSave })
 			saveTimeCorrectionConfig = func(_ *Runner, cfg Config) error {

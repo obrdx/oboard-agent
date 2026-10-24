@@ -1,21 +1,19 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
-
+	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/security"
 	"github.com/OboardProject/oboard-agent/internal/terminal"
-	"github.com/OboardProject/oboard-agent/internal/version"
 )
 
 const (
@@ -26,21 +24,21 @@ const (
 	interactiveMaxMessage  = 64 << 10
 	interactiveMaxSessions = 2
 
-	interactiveReasonPTYStartFailed      = "pty_start_failed"
-	interactiveReasonURLFailed           = "interactive_url_failed"
-	interactiveReasonWebsocketDialFailed = "websocket_dial_failed"
-	interactiveReasonSessionLimit        = "session_limit"
-	interactiveReasonPrepareInvalid      = "prepare_invalid"
-	interactiveReasonLocalGateDenied     = "agent_local_gate_denied"
-	interactiveReasonLoginShellDisabled  = "login_shell_disabled"
-	interactiveReasonLoginShellMissing   = "login_shell_missing"
-	interactiveReasonShellExited         = "shell_exited"
+	interactiveReasonPTYStartFailed         = "pty_start_failed"
+	interactiveReasonAgentLinkConfigInvalid = "agentlink_config_invalid"
+	interactiveReasonAgentLinkDialFailed    = "agentlink_dial_failed"
+	interactiveReasonSessionLimit           = "session_limit"
+	interactiveReasonPrepareInvalid         = "prepare_invalid"
+	interactiveReasonLocalGateDenied        = "agent_local_gate_denied"
+	interactiveReasonLoginShellDisabled     = "login_shell_disabled"
+	interactiveReasonLoginShellMissing      = "login_shell_missing"
+	interactiveReasonShellExited            = "shell_exited"
 )
 
 type terminalSession struct {
 	id          string
 	pty         terminal.Session
-	conn        *websocket.Conn
+	conn        *agentlink.MessageConn
 	spec        terminal.SessionSpec
 	created     time.Time
 	last        time.Time
@@ -231,6 +229,10 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 	}
 	r.interactiveMu.Unlock()
 
+	if err := r.Config().validateAgentLink(); err != nil {
+		r.reportInteractiveFailed(env.SessionID, interactiveReasonAgentLinkConfigInvalid, err.Error())
+		return
+	}
 	ptmx, spec, err := startInteractivePTY(cols, rows, mode)
 	if err != nil {
 		reason := interactiveReasonPTYStartFailed
@@ -244,25 +246,18 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 	}
 	logging.Infof("terminal session started session=%s uid=%d username=%s shell=%s mode=%s cwd=%s rows=%d cols=%d",
 		env.SessionID, spec.UID, spec.Username, spec.Shell, spec.Mode, spec.WorkDir, rows, cols)
-	wsURL, err := security.ControllerInteractiveWebSocketURL(r.Config().ControllerURL, env.SessionID, version.IsDev(), r.Config().AllowInsecureController)
+	cfg := r.Config()
+	link, err := agentlink.Dial(context.Background(), agentlink.ClientConfig{
+		Address: cfg.ControllerAddr, CertSHA256: cfg.ControllerCertSHA256,
+		AgentID: cfg.AgentID, Token: cfg.AgentToken, Purpose: "interactive", SessionID: env.SessionID,
+		Proof: security.InteractiveProof(secret, env.SessionID, env.ServerID, env.Nonce, env.ExpiresAt),
+	})
 	if err != nil {
 		_ = ptmx.Close()
-		r.reportInteractiveFailed(env.SessionID, interactiveReasonURLFailed, err.Error())
+		r.reportInteractiveFailed(env.SessionID, interactiveReasonAgentLinkDialFailed, err.Error())
 		return
 	}
-	header := http.Header{
-		"Authorization":              []string{"Bearer " + r.Config().AgentToken},
-		"X-Agent-ID":                 []string{r.Config().AgentID},
-		"X-OBoard-Interactive-Proof": []string{security.InteractiveProof(secret, env.SessionID, env.ServerID, env.Nonce, env.ExpiresAt)},
-	}
-	dialer := websocket.Dialer{ReadBufferSize: 4096, WriteBufferSize: 4096, EnableCompression: false, HandshakeTimeout: 10 * time.Second}
-	conn, _, err := dialer.Dial(wsURL, header)
-	if err != nil {
-		_ = ptmx.Close()
-		r.reportInteractiveFailed(env.SessionID, interactiveReasonWebsocketDialFailed, err.Error())
-		return
-	}
-	conn.SetReadLimit(interactiveMaxMessage)
+	conn := &agentlink.MessageConn{Session: link}
 	session := &terminalSession{id: env.SessionID, pty: ptmx, spec: spec, conn: conn, created: time.Now(), last: time.Now(), stop: make(chan struct{})}
 	r.interactiveMu.Lock()
 	r.terminalSessions[env.SessionID] = session
@@ -281,7 +276,7 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 			n, readErr := ptmx.Read(buf)
 			if n > 0 {
 				session.last = time.Now()
-				if writeErr := conn.WriteMessage(websocket.BinaryMessage, append([]byte(nil), buf[:n]...)); writeErr != nil {
+				if writeErr := conn.WriteMessage(agentlink.BinaryMessage, append([]byte(nil), buf[:n]...)); writeErr != nil {
 					session.signalStop()
 					return
 				}
@@ -308,11 +303,11 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 		}
 		session.last = time.Now()
 		switch mt {
-		case websocket.BinaryMessage:
+		case agentlink.BinaryMessage:
 			if _, err := ptmx.Write(data); err != nil {
 				return
 			}
-		case websocket.TextMessage:
+		case agentlink.TextMessage:
 			var msg struct {
 				Type string `json:"type"`
 				Cols int    `json:"cols"`

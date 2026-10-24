@@ -2,23 +2,26 @@ package agent
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/agentlink"
-	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/security"
 )
 
 // agentlinkControlConn adapts a binary-transport session to controlConn.
-// The session's Run loop is started by connectStealth; ReadMessage pulls the
+// The session's Run loop is started by connectAgentLink; ReadMessage pulls the
 // envelopes Run delivers.
 type agentlinkControlConn struct {
 	session  *agentlink.Session
@@ -86,55 +89,42 @@ func (c *agentlinkControlConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-// connectStealth establishes the binary transport session and runs the
+// connectAgentLink establishes the binary transport session and runs the
 // shared control session over it.
-func (r *Runner) connectStealth(ctx context.Context) error {
+func (r *Runner) connectAgentLink(ctx context.Context) error {
 	cfg := r.Config()
-	if cfg.Stealth == nil || cfg.Stealth.ControllerAddr == "" {
-		return errors.New("stealth transport is not configured")
+	if err := cfg.validateAgentLink(); err != nil {
+		return err
 	}
 	session, err := agentlink.Dial(ctx, agentlink.ClientConfig{
-		Address:    cfg.Stealth.ControllerAddr,
-		CertSHA256: cfg.Stealth.ControllerCertSHA256,
+		Address:    cfg.ControllerAddr,
+		CertSHA256: cfg.ControllerCertSHA256,
 		AgentID:    cfg.AgentID,
 		Token:      cfg.AgentToken,
 	})
 	if err != nil {
 		return err
 	}
-	// Persist the observed pin when the config has none yet (first
-	// connection after bootstrap with an out-of-band pin is not possible
-	// here; bootstrap passes the pin through enrollment).
-	if cfg.Stealth.ControllerCertSHA256 == "" {
-		next := cfg
-		copied := *cfg.Stealth
-		next.Stealth = &copied
-		next.Stealth.ControllerCertSHA256 = session.CertPin()
-		if err := r.saveAgentConfig(next); err != nil {
-			logging.Warnf("persist controller certificate pin: %v", err)
-		} else {
-			r.storeConfig(next)
-		}
-	}
-	r.setLiveStealthSession(session)
-	defer r.setLiveStealthSession(nil)
+	r.setLiveAgentLinkSession(session)
+	defer r.setLiveAgentLinkSession(nil)
 	conn := newAgentlinkControlConn(session)
 	return r.runControlSession(ctx, conn)
 }
 
-// setLiveStealthSession records the session callbacks can reuse.
-func (r *Runner) setLiveStealthSession(session *agentlink.Session) {
+// setLiveAgentLinkSession records the session callbacks can reuse.
+func (r *Runner) setLiveAgentLinkSession(session *agentlink.Session) {
 	r.controlSessionMu.Lock()
 	r.controlSessionLink = session
 	r.controlSessionMu.Unlock()
 }
 
-// enrollStealth performs enrollment over the binary transport and persists
+// enrollAgentLink performs enrollment over the binary transport and persists
 // the returned identity plus the certificate pin.
-func (r *Runner) enrollStealth(ctx context.Context, addr, pin, enrollmentToken string) error {
+func (r *Runner) enrollAgentLink(ctx context.Context, addr, pin, enrollmentToken string) error {
 	session, err := agentlink.Dial(ctx, agentlink.ClientConfig{
 		Address:         addr,
 		EnrollmentToken: enrollmentToken,
+		Health:          mustEnrollmentHealth(r.Probe(true)),
 		// Bootstrap: the panel passes the pin out of band, so the handshake
 		// is validated against it directly.
 		CertSHA256: pin,
@@ -157,26 +147,20 @@ func (r *Runner) enrollStealth(ctx context.Context, addr, pin, enrollmentToken s
 	cfg.AgentID = response.AgentID
 	cfg.AgentToken = response.AgentToken
 	cfg.ConnectionAuditEnabled = response.ConnectionAuditEnabled
-	if cfg.Stealth != nil {
-		next := cfg
-		copied := *cfg.Stealth
-		next.Stealth = &copied
-		next.Stealth.ControllerAddr = addr
-		next.Stealth.ControllerCertSHA256 = session.CertPin()
-		cfg = next
-	}
-	r.storeConfig(cfg)
-	r.connectionAudit.setEnabled(cfg.ConnectionAuditEnabled)
+	cfg.ControllerAddr = addr
+	cfg.ControllerCertSHA256 = session.CertPin()
 	if err := r.saveAgentConfig(cfg); err != nil {
 		return err
 	}
+	r.storeConfig(cfg)
+	r.connectionAudit.setEnabled(cfg.ConnectionAuditEnabled)
 	return nil
 }
 
 // controllerJSONOverTransport performs one callback as a transport RPC. The
 // server bridges the request into the existing HTTP handler, so the response
 // shapes are identical to the HTTP surface.
-func (r *Runner) controllerJSONOverTransport(ctx context.Context, method, path string, body any, out any, auth bool) error {
+func (r *Runner) controllerJSONOverTransport(ctx context.Context, method, path string, headers http.Header, body any, out any, auth bool) error {
 	if auth {
 		if wait := r.controllerAuth.remaining(time.Now()); wait > 0 {
 			return fmt.Errorf("controller rejected this agent identity; callbacks paused for %s", wait.Truncate(time.Second))
@@ -190,22 +174,19 @@ func (r *Runner) controllerJSONOverTransport(ctx context.Context, method, path s
 		}
 		raw = encoded
 	}
-	resp, err := r.transportRequest(ctx, path, raw)
+	resp, err := r.transportRequest(ctx, path, raw, headers)
 	if err != nil {
 		return err
 	}
 	if auth {
-		if resp.Status == 401 || resp.Status == 403 {
-			r.controllerAuth.armWithStatus(time.Now(), resp.Status)
+		if isControllerAuthRejection(resp.Status) {
+			r.controllerAuth.armWithResponse(time.Now(), resp.Status, http.Header(resp.Headers))
 		} else if resp.Status < 300 {
 			r.controllerAuth.clear()
 		}
 	}
 	if resp.Status >= 300 {
-		if resp.Error != "" {
-			return fmt.Errorf("controller returned %d: %s", resp.Status, resp.Error)
-		}
-		return fmt.Errorf("controller returned %d: %s", resp.Status, string(resp.Body))
+		return fmt.Errorf("controller returned %d %s", resp.Status, http.StatusText(resp.Status))
 	}
 	if out != nil && len(resp.Body) > 0 {
 		return json.Unmarshal(resp.Body, out)
@@ -215,43 +196,41 @@ func (r *Runner) controllerJSONOverTransport(ctx context.Context, method, path s
 
 // transportRequest issues one RPC on the live session, dialing a short-lived
 // one when no session is up (callbacks may fire between reconnects).
-func (r *Runner) transportRequest(ctx context.Context, path string, body json.RawMessage) (*agentlink.ResponseFrame, error) {
+func (r *Runner) transportRequest(ctx context.Context, path string, body json.RawMessage, headers http.Header) (*agentlink.ResponseFrame, error) {
 	cfg := r.Config()
-	if cfg.Stealth == nil || strings.TrimSpace(cfg.Stealth.ControllerAddr) == "" {
-		return nil, errors.New("stealth transport is not configured")
+	if strings.TrimSpace(cfg.ControllerAddr) == "" {
+		return nil, errors.New("AgentLink is not configured; reinstall with a current Controller enrollment command")
 	}
-	if session := r.liveStealthSession(); session != nil {
-		return session.Request(ctx, path, body, nil)
+	if session := r.liveAgentLinkSession(); session != nil {
+		return session.RequestWithHeaders(ctx, path, body, nil, headers)
 	}
 	// No live session: a short-lived authenticated session serves the
 	// callback. This mirrors HTTP callbacks that work while the WebSocket is
 	// down.
 	session, err := agentlink.Dial(ctx, agentlink.ClientConfig{
-		Address:    cfg.Stealth.ControllerAddr,
-		CertSHA256: cfg.Stealth.ControllerCertSHA256,
+		Address:    cfg.ControllerAddr,
+		CertSHA256: cfg.ControllerCertSHA256,
 		AgentID:    cfg.AgentID,
 		Token:      cfg.AgentToken,
+		Purpose:    "rpc",
 	})
 	if err != nil {
+		var authError *agentlink.AuthError
+		if errors.As(err, &authError) {
+			r.controllerAuth.armAgentLink(time.Now())
+		}
 		return nil, err
 	}
 	defer session.Close()
 	go func() {
 		_ = session.Run(func(map[string]json.RawMessage) {})
 	}()
-	return session.Request(ctx, path, body, nil)
+	return session.RequestWithHeaders(ctx, path, body, nil, headers)
 }
 
-// stealthTransportActive reports whether callbacks should use the binary
-// transport.
-func (r *Runner) stealthTransportActive() bool {
-	cfg := r.Config()
-	return cfg.Stealth != nil && strings.TrimSpace(cfg.Stealth.ControllerAddr) != ""
-}
-
-// liveStealthSession returns the current control-channel session when it is
+// liveAgentLinkSession returns the current control-channel session when it is
 // the binary transport, or nil.
-func (r *Runner) liveStealthSession() *agentlink.Session {
+func (r *Runner) liveAgentLinkSession() *agentlink.Session {
 	r.controlSessionMu.Lock()
 	defer r.controlSessionMu.Unlock()
 	if r.controlSessionLink != nil {
@@ -261,8 +240,7 @@ func (r *Runner) liveStealthSession() *agentlink.Session {
 }
 
 // transportDownload fetches one release artifact over the binary transport
-// in bounded chunks with resume, replacing the HTTP download path in stealth
-// mode. Integrity stays end-to-end: the caller still verifies the signed
+// in bounded chunks with resume, replacing the HTTP download path for all Agent layouts. Integrity stays end-to-end: the caller still verifies the signed
 // manifest after assembly, exactly as with HTTP downloads.
 func (r *Runner) transportDownload(ctx context.Context, session *agentlink.Session, name, destination string, expectedSize, maxBytes int64) error {
 	if expectedSize > 0 {
@@ -335,10 +313,11 @@ func (r *Runner) downloadAndInstallSignedReleaseOverTransport(ctx context.Contex
 	defer cancel()
 	cfg := r.Config()
 	session, err := agentlink.Dial(ctx, agentlink.ClientConfig{
-		Address:    cfg.Stealth.ControllerAddr,
-		CertSHA256: cfg.Stealth.ControllerCertSHA256,
+		Address:    cfg.ControllerAddr,
+		CertSHA256: cfg.ControllerCertSHA256,
 		AgentID:    cfg.AgentID,
 		Token:      cfg.AgentToken,
+		Purpose:    "rpc",
 	})
 	if err != nil {
 		return outcome, err
@@ -413,4 +392,22 @@ func (r *Runner) downloadAndInstallSignedReleaseOverTransport(ctx context.Contex
 	}
 	outcome.Manifest = manifest
 	return outcome, nil
+}
+
+func mustEnrollmentHealth(health any) json.RawMessage {
+	data, _ := json.Marshal(health)
+	return data
+}
+
+func (cfg Config) validateAgentLink() error {
+	host, port, err := net.SplitHostPort(cfg.ControllerAddr)
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || portNumber < 1 || portNumber > 65535 || host == "" || strings.ContainsAny(host, " /?#@\t\r\n") {
+		return errors.New("AgentLink requires controller_addr (host:port); reinstall with a current Controller enrollment command")
+	}
+	pin, err := hex.DecodeString(cfg.ControllerCertSHA256)
+	if err != nil || len(pin) != 32 || strings.ToLower(cfg.ControllerCertSHA256) != cfg.ControllerCertSHA256 {
+		return errors.New("AgentLink requires a lowercase SHA-256 controller certificate pin")
+	}
+	return nil
 }

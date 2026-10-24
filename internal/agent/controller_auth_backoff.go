@@ -72,7 +72,14 @@ func (b *controllerAuthBackoff) armWithStatus(now time.Time, status int) {
 }
 
 func (b *controllerAuthBackoff) armWithResponse(now time.Time, status int, header http.Header) {
-	class := controllerBackoffClass(status)
+	b.armWithClass(now, controllerBackoffClass(status), status, header)
+}
+
+func (b *controllerAuthBackoff) armAgentLink(now time.Time) {
+	b.armWithClass(now, "auth", 0, nil)
+}
+
+func (b *controllerAuthBackoff) armWithClass(now time.Time, class string, status int, header http.Header) {
 	if class == "" {
 		return
 	}

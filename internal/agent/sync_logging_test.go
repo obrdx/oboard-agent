@@ -85,7 +85,7 @@ func TestTrafficRequestRejectionLogsRestrictionAndPersistsStage(t *testing.T) {
 		http.Error(w, "confidential-response", http.StatusTooManyRequests)
 	}))
 	defer server.Close()
-	r := New(Config{ControllerURL: server.URL, StateDir: t.TempDir(), AgentID: "test", AgentToken: "private-token"})
+	r := newTestRunner(t, Config{ControllerURL: server.URL, StateDir: t.TempDir(), AgentID: "test", AgentToken: "private-token"})
 	state := r.trafficStateLocked()
 	for range 2 {
 		if err := r.reportTrafficLedger(context.Background(), state, nil); err == nil {

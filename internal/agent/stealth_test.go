@@ -90,7 +90,7 @@ func runnerForSwitch(t *testing.T, installDir, configPath, stateDir string) *Run
 		CoreService:   "oboard-sb",
 	}
 	cfg = normalizeConfig(cfg)
-	runner := New(cfg)
+	runner := newTestRunner(t, cfg)
 	// Pin the executable resolution to the fixture's agent binary so the
 	// switch copies from and reports the fixture layout.
 	original := osExecutable
@@ -508,7 +508,7 @@ func TestStatePathMapping(t *testing.T) {
 	dir := t.TempDir()
 	key, _ := stealth.GenerateKey()
 	cfg := Config{StateDir: dir, StealthKey: key}
-	runner := New(cfg)
+	runner := newTestRunner(t, cfg)
 	if runner.statePath("sing-box.json") == filepath.Join(dir, "sing-box.json") {
 		t.Fatal("stealth runner must derive physical names")
 	}
@@ -542,7 +542,7 @@ func TestUpdateAgentConfigRejectsStealthIdentityFields(t *testing.T) {
 	key, _ := stealth.GenerateKey()
 	cfg := normalizeConfig(Config{ConfigPath: filepath.Join(dir, "config.bin"), StateDir: dir, ControllerURL: "https://controller.example.com", Stealth: &stealth.Settings{Identity: stealth.Identity{AgentName: "abcdefghij", CoreName: "abcdefghik"}, KeyPath: filepath.Join(dir, "key")}, AgentService: "abcdefghij", CoreService: "abcdefghik"})
 	cfg.StealthKey = key
-	runner := New(cfg)
+	runner := newTestRunner(t, cfg)
 	if _, err := runner.updateAgentConfig(Config{}, map[string]json.RawMessage{"agent_service": json.RawMessage(`"zzzzzzzzzz"`)}); err == nil {
 		t.Fatal("agent_service patch must be rejected")
 	}

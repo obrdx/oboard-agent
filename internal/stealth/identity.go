@@ -256,8 +256,8 @@ func ResolveLayout(identity Identity, installDir, configParent, stateParent stri
 type Settings struct {
 	Identity Identity `json:"identity"`
 	KeyPath  string   `json:"key_path"`
-	// ControllerAddr is the dedicated binary-transport listener
-	// (host:port). Empty means the standard WebSocket channel.
+	// ControllerAddr is read only while migrating previous encrypted configurations.
+	// Current configurations keep the transport independently of the layout.
 	ControllerAddr string `json:"controller_addr,omitempty"`
 	// ControllerCertSHA256 pins the listener certificate.
 	ControllerCertSHA256 string          `json:"controller_cert_sha256,omitempty"`

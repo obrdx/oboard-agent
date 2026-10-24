@@ -41,7 +41,7 @@ func TestManagedAssetsDownloadOnlyWhenChangedAndResolvePaths(t *testing.T) {
 	}))
 	defer server.Close()
 	stateDir := t.TempDir()
-	runner := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: stateDir, AllowInsecureController: true})
+	runner := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: stateDir, AllowInsecureController: true})
 	config := `{"inbounds":[{"tls":{"certificate_path":"oboard-asset://certificate/7/fullchain.pem","key_path":"oboard-asset://certificate/7/privkey.pem"}}]}`
 	resolved, changed, err := runner.syncManagedAssets(context.Background(), []model.ManagedAssetReference{reference}, config)
 	if err != nil || !changed {
@@ -125,7 +125,7 @@ func TestApplyCoreConfigTaskSynchronizesAssetsAfterVersionGate(t *testing.T) {
 	}))
 	defer server.Close()
 	stateDir := t.TempDir()
-	runner := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: stateDir, CoreBinary: filepath.Join(stateDir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large", AllowInsecureController: true})
+	runner := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: stateDir, CoreBinary: filepath.Join(stateDir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large", AllowInsecureController: true})
 	payload := model.ApplyCoreConfigTaskPayload{
 		Config: `{"inbounds":[{"tls":{"certificate_path":"oboard-asset://certificate/7/fullchain.pem","key_path":"oboard-asset://certificate/7/privkey.pem"}}]}`,
 		Assets: []model.ManagedAssetReference{reference},
@@ -175,7 +175,7 @@ func TestManagedRoutingRuleSetAssetInstallResolveAndCleanupByKind(t *testing.T) 
 		_ = json.NewEncoder(w).Encode(model.ManagedAssetResponse{Assets: []model.ManagedAsset{{ManagedAssetReference: reference, Files: []model.ManagedAssetFile{{Name: "rules.json", ContentB64: base64.StdEncoding.EncodeToString(content), Mode: 0o600}}}}})
 	}))
 	defer server.Close()
-	runner := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: t.TempDir(), AllowInsecureController: true})
+	runner := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: t.TempDir(), AllowInsecureController: true})
 	config := `{"route":{"rule_set":[{"type":"local","tag":"routing-rule-set-7","format":"source","path":"oboard-asset://routing-rule-set/7/rules.json"}]}}`
 	resolved, changed, err := runner.syncManagedAssets(context.Background(), []model.ManagedAssetReference{reference}, config)
 	if err != nil || !changed || strings.Contains(resolved, "oboard-asset://") {

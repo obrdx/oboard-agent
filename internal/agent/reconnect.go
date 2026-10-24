@@ -3,6 +3,8 @@ package agent
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
+	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"math/rand"
 	"net"
 	"net/http"
@@ -53,6 +55,10 @@ func reconnectFailureDelay(failures int) time.Duration {
 func isAuthReconnectError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var authError *agentlink.AuthError
+	if errors.As(err, &authError) {
+		return true
 	}
 	if status := websocketDialStatus(err); status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return true

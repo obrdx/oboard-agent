@@ -123,13 +123,13 @@ func TestMetricReportQueueReplaysInOrderOverWebSocket(t *testing.T) {
 	defer server.Close()
 
 	stateDir := t.TempDir()
-	runner := New(Config{AgentID: "agent-metric", AgentToken: "token", ControllerURL: server.URL, StateDir: stateDir, ResourceProfile: "large", CommandTimeoutSeconds: 20, AllowInsecureController: true})
+	runner := newTestRunner(t, Config{AgentID: "agent-metric", AgentToken: "token", ControllerURL: server.URL, StateDir: stateDir, ResourceProfile: "large", CommandTimeoutSeconds: 20, AllowInsecureController: true})
 	base := time.Now().UTC()
 	_, _ = runner.queueMetricReport(model.MetricReport{ReportID: "second", SampledAt: base.Add(time.Minute)}, base.Add(time.Minute))
 	_, _ = runner.queueMetricReport(model.MetricReport{ReportID: "first", SampledAt: base}, base.Add(time.Minute))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	go func() { _ = runner.connect(ctx) }()
+	go func() { _ = runner.connectTestControl(ctx) }()
 	select {
 	case ids := <-received:
 		if len(ids) != 2 || ids[0] != "first" || ids[1] != "second" {

@@ -74,6 +74,8 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 	}
 	// Enrollment command generation requires the public controller address.
 	processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/settings", token, map[string]any{"controller_url": baseURL}, http.StatusOK)
+	linkAddress := "127.0.0.1:" + strconv.Itoa(processTestPort(t))
+	processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/settings", token, map[string]any{"stealth_transport": map[string]any{"enabled": true, "listen_address": linkAddress, "public_address": linkAddress}}, http.StatusOK)
 	created := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/servers", token, map[string]any{
 		"name": "process-node", "renewal_cycle": "monthly", "listen_ip": "0.0.0.0", "entry_ip_mode": "custom", "entry_address": "198.51.100.20", "public_ipv4": "198.51.100.20", "port_range_start": 10000, "port_range_end": 11000,
 	}, http.StatusCreated)
@@ -94,17 +96,28 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 	}
 	agentState := filepath.Join(scope, "agent-state")
 	agentConfig := filepath.Join(scope, "agent.json")
+	// Recreate the installed old Agent state, then start the new binary without transport fields.
+	legacy := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/agent/enroll", "", map[string]any{"enrollment_token": enrollmentToken, "health": map[string]any{"os": "linux", "arch": runtime.GOARCH}}, http.StatusOK)
+	oldConfig := map[string]any{"controller_url": baseURL, "server_id": serverID, "agent_id": legacy["agent_id"], "agent_token": legacy["agent_token"], "state_dir": agentState, "allow_insecure_controller": true}
+	previousBytes, _ := json.Marshal(oldConfig)
+	if err := os.WriteFile(agentConfig, previousBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
 	agentProcess := exec.Command(agentBinary,
 		"-controller", baseURL, "-config", agentConfig, "-state-dir", agentState,
 		"-reload-command", "none", "-restart-command", "none",
 		"-time-sync-command", "none", "-resource-profile", "large",
 	)
-	agentProcess.Env = append(os.Environ(), "OBOARD_ENROLL_TOKEN="+enrollmentToken, "OBOARD_DISABLE_PUBLIC_IP_DETECT=1", "PATH="+scope+string(os.PathListSeparator)+os.Getenv("PATH"))
+	agentProcess.Env = append(os.Environ(), "OBOARD_DISABLE_PUBLIC_IP_DETECT=1", "PATH="+scope+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := agentProcess.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { stopProcess(agentProcess) })
 	waitProcessCondition(t, 20*time.Second, func() bool {
+		migrated, err := LoadConfig(agentConfig)
+		if err != nil || migrated.ControllerAddr != linkAddress || len(migrated.ControllerCertSHA256) != 64 {
+			return false
+		}
 		servers := processJSONRequestOptional(baseURL, http.MethodGet, "/api/v1/ui/servers", token, nil)
 		for _, raw := range processArray(servers["servers"]) {
 			server, _ := raw.(map[string]any)
@@ -114,6 +127,11 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 		}
 		return false
 	})
+
+	migrated, err := LoadConfig(agentConfig)
+	if err != nil || migrated.ControllerAddr != linkAddress || len(migrated.ControllerCertSHA256) != 64 {
+		t.Fatalf("real Agent did not persist automatic transition: %v", err)
+	}
 
 	// Save while the Agent is offline, then restart the enrolled Agent. The
 	// durable desired revision must survive the disconnect and converge after

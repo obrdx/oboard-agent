@@ -29,7 +29,7 @@ func TestControllerRejectionPausesAuthenticatedCallbacks(t *testing.T) {
 				http.Error(w, "rejected", status)
 			}))
 			defer server.Close()
-			runner := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "stale", StateDir: t.TempDir()})
+			runner := newTestRunner(t, Config{ConfigPath: filepath.Join(t.TempDir(), "agent.json"), ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "stale", StateDir: t.TempDir()})
 			ctx := context.Background()
 			if err := runner.postControllerJSON(ctx, "/api/v1/agent/traffic-reports", map[string]any{}, nil, true); err == nil {
 				t.Fatal("a rejected identity must surface as an error")
@@ -58,14 +58,14 @@ func TestControllerAuthBackoffScopeAndRelease(t *testing.T) {
 			http.Error(w, "rejected", http.StatusUnauthorized)
 			return
 		}
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true,"server_id":7,"agent_id":"new-agent","agent_token":"new-token"}`))
 	}))
 	defer server.Close()
-	runner := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "stale", StateDir: t.TempDir()})
+	runner := newTestRunner(t, Config{ConfigPath: filepath.Join(t.TempDir(), "agent.json"), ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "stale", StateDir: t.TempDir()})
 	ctx := context.Background()
 	_ = runner.postControllerJSON(ctx, "/api/v1/agent/traffic-reports", map[string]any{}, nil, true)
 	before := requests.Load()
-	if err := runner.postControllerJSON(ctx, "/api/v1/agent/enroll", map[string]any{}, nil, false); err != nil {
+	if err := runner.Enroll(ctx, "fresh-enrollment"); err != nil {
 		t.Fatalf("enrollment must not be gated by an agent-identity rejection: %v", err)
 	}
 	if requests.Load() != before+1 {
@@ -117,7 +117,7 @@ func TestControllerAuthBackoffGrowsExponentially(t *testing.T) {
 func TestUpdateAgentConfigClearsControllerBackoff(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	runner := New(Config{ControllerURL: "http://127.0.0.1:9", AgentID: "agent-1", AgentToken: "tok", StateDir: dir, ConfigPath: cfgPath})
+	runner := newTestRunner(t, Config{ControllerURL: "http://127.0.0.1:9", AgentID: "agent-1", AgentToken: "tok", StateDir: dir, ConfigPath: cfgPath})
 	if err := SaveConfig(cfgPath, runner.Config()); err != nil {
 		t.Fatal(err)
 	}

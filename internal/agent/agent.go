@@ -22,8 +22,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
-
 	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"github.com/OboardProject/oboard-agent/internal/authorization"
 	"github.com/OboardProject/oboard-agent/internal/core"
@@ -38,40 +36,43 @@ import (
 )
 
 type Config struct {
-	ConfigPath              string                   `json:"-"`
-	ControllerURL           string                   `json:"controller_url"`
-	ServerID                int64                    `json:"server_id"`
-	AgentID                 string                   `json:"agent_id"`
-	AgentToken              string                   `json:"agent_token"`
-	StateDir                string                   `json:"state_dir"`
-	CoreBinary              string                   `json:"core_binary"`
-	CoreService             string                   `json:"core_service"`
-	AgentService            string                   `json:"agent_service,omitempty"`
-	CoreSocket              string                   `json:"core_socket,omitempty"`
-	Stealth                 *stealth.Settings        `json:"stealth,omitempty"`
-	ResourceProfile         string                   `json:"resource_profile"`
-	CommandTimeoutSeconds   int                      `json:"command_timeout_seconds"`
-	ReloadCommand           string                   `json:"reload_command"`
-	RestartCommand          string                   `json:"restart_command"`
-	TimeSyncCommand         string                   `json:"time_sync_command"`
-	TimeCorrectionMode      model.TimeCorrectionMode `json:"time_correction_mode"`
-	LogLevel                string                   `json:"log_level"`
-	LogLevelExpiresAt       string                   `json:"log_level_expires_at,omitempty"`
-	LogMaxMB                int                      `json:"log_max_mb"`
-	LogBackups              int                      `json:"log_backups"`
-	CoreLogMaxMB            int                      `json:"core_log_max_mb"`
-	CoreLogBackups          int                      `json:"core_log_backups"`
-	LogBackupsSet           bool                     `json:"-"`
-	CoreLogBackupsSet       bool                     `json:"-"`
-	LogMaxMBSet             bool                     `json:"-"`
-	CoreLogMaxMBSet         bool                     `json:"-"`
-	StorageProfile          string                   `json:"storage_profile"`
-	WarpCommand             string                   `json:"warp_command"`
-	UpdateSource            string                   `json:"update_source"`
-	AllowPanelUpdate        bool                     `json:"allow_panel_update"`
-	AllowInsecureController bool                     `json:"allow_insecure_controller"`
-	UpdateRepo              string                   `json:"update_repo,omitempty"`
-	ConnectionAuditEnabled  bool                     `json:"connection_audit_enabled"`
+	agentLinkMigrationPending bool
+	ConfigPath                string                   `json:"-"`
+	ControllerAddr            string                   `json:"controller_addr"`
+	ControllerCertSHA256      string                   `json:"controller_cert_sha256"`
+	ControllerURL             string                   `json:"controller_url"`
+	ServerID                  int64                    `json:"server_id"`
+	AgentID                   string                   `json:"agent_id"`
+	AgentToken                string                   `json:"agent_token"`
+	StateDir                  string                   `json:"state_dir"`
+	CoreBinary                string                   `json:"core_binary"`
+	CoreService               string                   `json:"core_service"`
+	AgentService              string                   `json:"agent_service,omitempty"`
+	CoreSocket                string                   `json:"core_socket,omitempty"`
+	Stealth                   *stealth.Settings        `json:"stealth,omitempty"`
+	ResourceProfile           string                   `json:"resource_profile"`
+	CommandTimeoutSeconds     int                      `json:"command_timeout_seconds"`
+	ReloadCommand             string                   `json:"reload_command"`
+	RestartCommand            string                   `json:"restart_command"`
+	TimeSyncCommand           string                   `json:"time_sync_command"`
+	TimeCorrectionMode        model.TimeCorrectionMode `json:"time_correction_mode"`
+	LogLevel                  string                   `json:"log_level"`
+	LogLevelExpiresAt         string                   `json:"log_level_expires_at,omitempty"`
+	LogMaxMB                  int                      `json:"log_max_mb"`
+	LogBackups                int                      `json:"log_backups"`
+	CoreLogMaxMB              int                      `json:"core_log_max_mb"`
+	CoreLogBackups            int                      `json:"core_log_backups"`
+	LogBackupsSet             bool                     `json:"-"`
+	CoreLogBackupsSet         bool                     `json:"-"`
+	LogMaxMBSet               bool                     `json:"-"`
+	CoreLogMaxMBSet           bool                     `json:"-"`
+	StorageProfile            string                   `json:"storage_profile"`
+	WarpCommand               string                   `json:"warp_command"`
+	UpdateSource              string                   `json:"update_source"`
+	AllowPanelUpdate          bool                     `json:"allow_panel_update"`
+	AllowInsecureController   bool                     `json:"allow_insecure_controller"`
+	UpdateRepo                string                   `json:"update_repo,omitempty"`
+	ConnectionAuditEnabled    bool                     `json:"connection_audit_enabled"`
 	// StealthKey holds the raw stealth key at runtime when the agent was
 	// started with -key. It is never serialized: the key lives only in the
 	// key file and in memory.
@@ -545,6 +546,18 @@ func (r *Runner) saveAgentConfig(cfg Config) error {
 }
 
 func normalizeConfig(cfg Config) Config {
+	// Preserve the certificate pin from the previous encrypted layout configuration.
+	if cfg.Stealth != nil && (cfg.Stealth.ControllerAddr != "" || cfg.Stealth.ControllerCertSHA256 != "") {
+		if cfg.ControllerAddr == "" && cfg.ControllerCertSHA256 == "" {
+			cfg.ControllerAddr = cfg.Stealth.ControllerAddr
+			cfg.ControllerCertSHA256 = cfg.Stealth.ControllerCertSHA256
+		}
+		previous := *cfg.Stealth
+		previous.ControllerAddr, previous.ControllerCertSHA256 = "", ""
+		cfg.Stealth = &previous
+		cfg.agentLinkMigrationPending = true
+	}
+
 	if cfg.StateDir == "" {
 		cfg.StateDir = DefaultStateDir()
 	}
@@ -924,45 +937,22 @@ func lowOverheadTransportWithClock(now func() time.Time) *http.Transport {
 }
 
 func (r *Runner) Enroll(ctx context.Context, enrollmentToken string) error {
-	bootstrap := r.Config()
-	if bootstrap.Stealth != nil && strings.TrimSpace(bootstrap.Stealth.ControllerAddr) != "" {
-		return r.enrollStealth(ctx, bootstrap.Stealth.ControllerAddr, bootstrap.Stealth.ControllerCertSHA256, enrollmentToken)
+	cfg := r.Config()
+	if err := cfg.validateAgentLink(); err != nil {
+		return err
 	}
-	if strings.TrimSpace(bootstrap.ConfigPath) != "" {
-		if err := r.saveAgentConfig(bootstrap); err != nil {
+	if strings.TrimSpace(cfg.ConfigPath) != "" {
+		if err := r.saveAgentConfig(cfg); err != nil {
 			return fmt.Errorf("save enrollment bootstrap config: %w", err)
 		}
 	}
-	reqBody := map[string]any{"enrollment_token": enrollmentToken, "health": r.Probe(true)}
-	var resp struct {
-		ServerID               int64  `json:"server_id"`
-		AgentID                string `json:"agent_id"`
-		AgentToken             string `json:"agent_token"`
-		ConnectionAuditEnabled bool   `json:"connection_audit_enabled"`
-		Error                  string `json:"error"`
-	}
-	if err := r.postControllerJSON(ctx, "/api/v1/agent/enroll", reqBody, &resp, false); err != nil {
-		return err
-	}
-	if resp.Error != "" {
-		return errors.New(resp.Error)
-	}
-	cfg := r.Config()
-	cfg.ServerID = resp.ServerID
-	cfg.AgentID = resp.AgentID
-	cfg.AgentToken = resp.AgentToken
-	cfg.ConnectionAuditEnabled = resp.ConnectionAuditEnabled
-	r.storeConfig(cfg)
-	r.connectionAudit.setEnabled(cfg.ConnectionAuditEnabled)
-	if strings.TrimSpace(cfg.ConfigPath) != "" {
-		if err := r.saveAgentConfig(cfg); err != nil {
-			return fmt.Errorf("save enrolled agent config: %w", err)
-		}
-	}
-	return nil
+	return r.enrollAgentLink(ctx, cfg.ControllerAddr, cfg.ControllerCertSHA256, enrollmentToken)
 }
 
 func (r *Runner) Run(ctx context.Context) error {
+	if err := r.ensureAgentLink(ctx); err != nil {
+		return err
+	}
 	cfg := r.Config()
 	if cfg.AgentID == "" || cfg.AgentToken == "" {
 		return errors.New("agent is not enrolled")
@@ -1017,8 +1007,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		// callbacks too, and a session that actually ran proves the identity
 		// is valid and releases them.
 		if authFailure {
-			_, _, status, _ := classifyControllerLinkError(err)
-			r.controllerAuth.armWithStatus(time.Now(), status)
+			var linkAuth *agentlink.AuthError
+			if errors.As(err, &linkAuth) {
+				r.controllerAuth.armAgentLink(time.Now())
+			} else {
+				_, _, status, _ := classifyControllerLinkError(err)
+				r.controllerAuth.armWithStatus(time.Now(), status)
+			}
 		} else if lived >= 60*time.Second {
 			// The same threshold the reconnect counter already treats as a
 			// real session: it can only be reached after the Controller
@@ -1072,53 +1067,8 @@ type controlConn interface {
 	SetReadDeadline(t time.Time) error
 }
 
-// wsControlConn adapts the gorilla connection.
-type wsControlConn struct {
-	conn *websocket.Conn
-}
-
-func (c wsControlConn) Close() error       { return c.conn.Close() }
-func (c wsControlConn) RemoteAddr() string { return c.conn.RemoteAddr().String() }
-func (c wsControlConn) WriteJSON(payload any) error {
-	if err := c.conn.SetWriteDeadline(time.Now().Add(controllerSocketWriteTimeout)); err != nil {
-		return err
-	}
-	return c.conn.WriteJSON(payload)
-}
-func (c wsControlConn) ReadMessage() ([]byte, error) {
-	_, data, err := c.conn.ReadMessage()
-	return data, err
-}
-func (c wsControlConn) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
-
 func (r *Runner) connect(ctx context.Context) error {
-	if cfg := r.Config(); cfg.Stealth != nil && strings.TrimSpace(cfg.Stealth.ControllerAddr) != "" {
-		return r.connectStealth(ctx)
-	}
-	wsConn, err := r.dialControl(ctx)
-	if err != nil {
-		return err
-	}
-	conn := wsControlConn{conn: wsConn}
-	wsConn.SetReadLimit(controllerSocketReadLimit)
-	configureControllerSocket(wsConn, controllerSocketReadTimeout)
-	return r.runControlSession(ctx, conn)
-}
-
-// dialControl establishes the standard WebSocket channel.
-func (r *Runner) dialControl(ctx context.Context) (*websocket.Conn, error) {
-	cfg := r.Config()
-	url, err := security.ControllerWebSocketURL(cfg.ControllerURL, version.IsDev(), cfg.AllowInsecureController)
-	if err != nil {
-		return nil, err
-	}
-	header := http.Header{"Authorization": []string{"Bearer " + cfg.AgentToken}, "X-Agent-ID": []string{cfg.AgentID}}
-	dialer := websocket.Dialer{ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false, HandshakeTimeout: 10 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, Time: time.Now}}
-	conn, handshakeResponse, err := dialer.DialContext(ctx, url, header)
-	if err != nil {
-		return nil, newControllerHandshakeError(err, handshakeResponse)
-	}
-	return conn, nil
+	return r.connectAgentLink(ctx)
 }
 
 // runControlSession drives the shared session loop over one transport.
@@ -1947,7 +1897,6 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 	if controllerURL == "" {
 		controllerURL = strings.TrimRight(strings.TrimSpace(r.Config().ControllerURL), "/")
 	}
-	var releaseBaseURL string
 	switch source {
 	case "panel":
 		if controllerURL == "" {
@@ -1959,12 +1908,10 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 		if _, err := security.ValidateControllerURL(controllerURL, version.IsDev(), r.Config().AllowInsecureController); err != nil {
 			return map[string]any{"message": "agent update failed", "source": source}, err
 		}
-		releaseBaseURL = controllerURL + "/downloads"
 	case "github":
 		if _, err := security.ValidateControllerURL(controllerURL, version.IsDev(), r.Config().AllowInsecureController); err != nil {
 			return map[string]any{"message": "agent update failed", "source": source}, err
 		}
-		releaseBaseURL = controllerURL + "/downloads/github"
 	default:
 		return map[string]any{"message": "agent update failed", "source": source}, fmt.Errorf("unsupported update source %q", source)
 	}
@@ -1981,17 +1928,7 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 	if err != nil {
 		return map[string]any{"message": "agent update failed", "source": source}, err
 	}
-	if r.stealthTransportActive() {
-		// Stealth agents never touch the panel's HTTP download surface; the
-		// same signed release travels over the binary transport.
-		outcome, err := r.downloadAndInstallSignedReleaseOverTransport(context.Background(), repo, payload.ExpectedBuild, targets, r.updateStagingPrefix())
-		return r.updateAgentResult(err, outcome, source, controllerURL, payload, targets, beforeAgent, beforeCore)
-	}
-	policy := defaultReleaseDownloadPolicy
-	if !payload.AutoUpdate {
-		policy.attempts = 1
-	}
-	outcome, err := r.downloadAndInstallSignedReleaseWithPolicy(context.Background(), r.client, releaseBaseURL, repo, payload.ExpectedBuild, targets, r.updateStagingPrefix(), policy)
+	outcome, err := r.downloadAndInstallSignedReleaseOverTransport(context.Background(), repo, payload.ExpectedBuild, targets, r.updateStagingPrefix())
 	return r.updateAgentResult(err, outcome, source, controllerURL, payload, targets, beforeAgent, beforeCore)
 }
 
@@ -2402,20 +2339,11 @@ func (r *Runner) runNetworkDiagnostics(payloadJSON string) map[string]any {
 
 func (r *Runner) diagnoseControllerConnectivity() map[string]any {
 	cfg := r.Config()
-	out := map[string]any{"controller_url": cfg.ControllerURL}
-	u, err := http.NewRequest(http.MethodGet, strings.TrimRight(cfg.ControllerURL, "/")+"/healthz", nil)
+	out := map[string]any{"transport": "agentlink", "controller_addr": cfg.ControllerAddr}
+	host, port, err := net.SplitHostPort(cfg.ControllerAddr)
 	if err != nil {
-		out["error"] = err.Error()
+		out["error"] = "AgentLink 专用地址未配置或无效"
 		return out
-	}
-	host := u.URL.Hostname()
-	port := u.URL.Port()
-	if port == "" {
-		if u.URL.Scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
-		}
 	}
 	out["tcp"] = tcpDiagnosticProbe(host, port)
 	return out
@@ -3533,65 +3461,7 @@ func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, 
 // mode the callback travels as an RPC frame over the binary transport
 // instead of HTTP: the agent never touches the panel's HTTP surface.
 func (r *Runner) controllerJSON(ctx context.Context, method, path string, headers http.Header, body any, out any, auth bool) error {
-	if r.stealthTransportActive() {
-		return r.controllerJSONOverTransport(ctx, method, path, body, out, auth)
-	}
-	var reader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(b)
-	}
-	cfg := r.Config()
-	if auth {
-		if wait := r.controllerAuth.remaining(time.Now()); wait > 0 {
-			return fmt.Errorf("controller rejected this agent identity; callbacks paused for %s", wait.Truncate(time.Second))
-		}
-	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(cfg.ControllerURL, "/")+path, reader)
-	if err != nil {
-		return err
-	}
-	for key, values := range headers {
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if auth {
-		req.Header.Set("Authorization", "Bearer "+cfg.AgentToken)
-		req.Header.Set("X-Agent-ID", cfg.AgentID)
-	}
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, controllerResponseLimit+1))
-	if err != nil {
-		return err
-	}
-	if len(data) > controllerResponseLimit {
-		return fmt.Errorf("controller response exceeds %d bytes", controllerResponseLimit)
-	}
-	if auth {
-		if isControllerAuthRejection(resp.StatusCode) {
-			r.controllerAuth.armWithResponse(time.Now(), resp.StatusCode, resp.Header)
-		} else if resp.StatusCode < 300 {
-			r.controllerAuth.clear()
-		}
-	}
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("controller returned %s: %s", resp.Status, string(data))
-	}
-	if out != nil {
-		return json.Unmarshal(data, out)
-	}
-	return nil
+	return r.controllerJSONOverTransport(ctx, method, path, headers, body, out, auth)
 }
 
 // Task completion must not wait for public-IP discovery or another health probe.
@@ -3854,6 +3724,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 // so the Controller can show desired versus actual state.
 func (r *Runner) agentCapabilities(kernelCapabilities []string) []string {
 	capabilities := append(append([]string(nil), kernelCapabilities...),
+		"agentlink_v1",
 		model.AgentCapabilityTrafficPolicy,
 		model.AgentCapabilityAuthorizationControl,
 		model.AgentCapabilityRuntimeUsers,

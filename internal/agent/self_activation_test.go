@@ -283,12 +283,12 @@ func TestUpdateArmsRestartWhenResultReportFails(t *testing.T) {
 	defer server.Close()
 
 	var scheduled atomic.Int32
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: stateDir, CoreBinary: installedCore, AllowPanelUpdate: true, AllowInsecureController: true})
+	r := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: stateDir, CoreBinary: installedCore, AllowPanelUpdate: true, AllowInsecureController: true})
 	r.agentRestartCommand = func() error { scheduled.Add(1); return nil }
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := r.connect(ctx); err == nil {
+	if err := r.connectTestControl(ctx); err == nil {
 		t.Fatal("expected the task result report to fail")
 	}
 

@@ -29,7 +29,7 @@ func TestDeliveryFaultHelper(t *testing.T) {
 		return
 	}
 	state := os.Getenv("OBOARD_DELIVERY_STATE")
-	r := New(Config{ControllerURL: os.Getenv("OBOARD_DELIVERY_CONTROLLER"), AgentID: "delivery-agent", AgentToken: "synthetic-delivery-token", ServerID: 1, StateDir: state, CoreBinary: os.Getenv("OBOARD_PROCESS_KERNEL"), CoreSocket: filepath.Join(state, "k.sock"), ResourceProfile: "large", RestartCommand: "none", ReloadCommand: "none", TimeSyncCommand: "none"})
+	r := newTestRunner(t, Config{ControllerURL: os.Getenv("OBOARD_DELIVERY_CONTROLLER"), AgentID: "delivery-agent", AgentToken: "synthetic-delivery-token", ServerID: 1, StateDir: state, CoreBinary: os.Getenv("OBOARD_PROCESS_KERNEL"), CoreSocket: filepath.Join(state, "k.sock"), ResourceProfile: "large", RestartCommand: "none", ReloadCommand: "none", TimeSyncCommand: "none"})
 	r.coreRestartCommand = func() error {
 		c := &http.Client{Timeout: 10 * time.Second}
 		resp, err := c.Post(os.Getenv("OBOARD_DELIVERY_SUPERVISOR"), "application/json", nil)
@@ -45,7 +45,7 @@ func TestDeliveryFaultHelper(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 	for ctx.Err() == nil {
-		_ = r.connect(ctx)
+		_ = r.connectTestControl(ctx)
 	}
 }
 

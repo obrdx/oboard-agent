@@ -718,14 +718,14 @@ func TestGitHubUpdateUsesControllerPinnedManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	osExecutable = func() (string, error) { return agentPath, nil }
-	r := New(Config{ControllerURL: server.URL + "/hidden", StateDir: filepath.Join(dir, "state"), CoreBinary: corePath, UpdateSource: "github"})
+	r := newTestRunner(t, Config{ControllerURL: server.URL + "/hidden", StateDir: filepath.Join(dir, "state"), CoreBinary: corePath, UpdateSource: "github"})
 	r.client = server.Client()
 	result, err := r.updateAgentBinary(`{"source":"github","expected_build":"20260909020202"}`)
 	if err == nil || !strings.Contains(err.Error(), "does not match expected build") || result["installed"] == true {
 		t.Fatalf("accepted mismatched Controller build: %#v, %v", result, err)
 	}
-	if paths.Load() != 2 {
-		t.Fatalf("manifest requests = %v", paths.Load())
+	if paths.Load() != 4 {
+		t.Fatalf("manifest chunk/EOF requests = %v", paths.Load())
 	}
 	assertFileContent(t, agentPath, []byte("old-agent"))
 }

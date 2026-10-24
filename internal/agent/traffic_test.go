@@ -30,7 +30,7 @@ func TestPostControllerJSONPreservesControllerBasePath(t *testing.T) {
 	}))
 	defer server.Close()
 
-	runner := New(Config{ControllerURL: server.URL + "/hidden-panel", AgentID: "agent-1", AgentToken: "token-1", StateDir: t.TempDir()})
+	runner := newTestRunner(t, Config{ControllerURL: server.URL + "/hidden-panel", AgentID: "agent-1", AgentToken: "token-1", StateDir: t.TempDir()})
 	if err := runner.postControllerJSON(context.Background(), "/api/v1/agent/task-results", map[string]any{"task_id": 1}, nil, true); err != nil {
 		t.Fatal(err)
 	}

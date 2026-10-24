@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"errors"
+	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"net"
 	"net/http"
 	"strings"
@@ -141,6 +142,10 @@ func (r *Runner) writeControllerLinkDiagnostics(snapshot controllerLinkDiagnosti
 func classifyControllerLinkError(err error) (class, detail string, httpStatus, closeCode int) {
 	if err == nil {
 		return controllerLinkClassShutdown, "", 0, 0
+	}
+	var authError *agentlink.AuthError
+	if errors.As(err, &authError) {
+		return controllerLinkClassHandshake, scrubControllerLinkDetail(authError.Error()), 0, 0
 	}
 	var handshake *controllerHandshakeError
 	if errors.As(err, &handshake) {

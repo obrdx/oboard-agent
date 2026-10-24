@@ -72,7 +72,7 @@ fi
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
 	defer controller.Close()
-	runner := New(Config{ControllerURL: controller.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: t.TempDir(), AllowInsecureController: true})
+	runner := newTestRunner(t, Config{ControllerURL: controller.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: t.TempDir(), AllowInsecureController: true})
 	result, err := runner.issueCertificateHTTP(42, model.IssueCertificateHTTPTaskPayload{CertificateID: 9, Domains: []string{"entry.example.com"}, ACMECA: "letsencrypt"})
 	if err != nil {
 		t.Fatal(err)

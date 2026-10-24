@@ -38,7 +38,7 @@ func stealthRuntimeFixture(t *testing.T, mutate func(*Config)) (*Runner, string,
 	if err := SaveConfigWithKey(configPath, cfg, key); err != nil {
 		t.Fatal(err)
 	}
-	runner := New(cfg)
+	runner := newTestRunner(t, cfg)
 	return runner, configPath, key
 }
 
@@ -115,7 +115,7 @@ func TestRuntimeConfigWritesStayPlaintextWithoutKey(t *testing.T) {
 	if err := SaveConfig(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
-	runner := New(cfg)
+	runner := newTestRunner(t, cfg)
 	if err := runner.bindServerIdentity(7); err != nil {
 		t.Fatal(err)
 	}

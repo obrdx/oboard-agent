@@ -2,8 +2,7 @@ package agent
 
 import (
 	"bytes"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"strings"
 	"testing"
 )
@@ -37,21 +36,15 @@ func TestManagementConsoleCommandHelpAndUnknown(t *testing.T) {
 }
 
 func TestManagementControllerCheck(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" {
-			http.NotFound(w, r)
-			return
+	addr, pin := agentLinkFixture(t, func(conn net.Conn) {
+		_, _, err := readAgentLinkFixture(conn)
+		if err == nil {
+			_ = writeAgentLinkFixture(conn, 3, nil)
 		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	result := checkManagementController(Config{ControllerURL: server.URL})
-	if !result.OK {
-		t.Fatalf("check failed: %#v", result)
-	}
-	if len(result.Items) != 4 || !result.Items[3].OK {
-		t.Fatalf("unexpected check items: %#v", result.Items)
+	})
+	result := checkManagementController(Config{ControllerAddr: addr, ControllerCertSHA256: pin, AgentID: "a", AgentToken: "t"})
+	if !result.OK || len(result.Items) != 1 || !result.Items[0].OK {
+		t.Fatalf("AgentLink verification failed: %#v", result)
 	}
 }
 
@@ -63,18 +56,14 @@ func TestDisplayControllerURLRemovesSensitiveParts(t *testing.T) {
 }
 
 func TestManagementControllerCheckKeepsBasePath(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Controller answers 404 for every path outside its base path.
-		if r.URL.Path != "/qzq/healthz" {
-			http.NotFound(w, r)
-			return
+	addr, pin := agentLinkFixture(t, func(conn net.Conn) {
+		_, _, err := readAgentLinkFixture(conn)
+		if err == nil {
+			_ = writeAgentLinkFixture(conn, 3, nil)
 		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	result := checkManagementController(Config{ControllerURL: server.URL + "/qzq"})
+	})
+	result := checkManagementController(Config{ControllerURL: "https://unreachable.invalid/qzq", ControllerAddr: addr, ControllerCertSHA256: pin, AgentID: "a", AgentToken: "t"})
 	if !result.OK {
-		t.Fatalf("base path health check failed: %#v", result.Items)
+		t.Fatalf("AgentLink depended on panel base path: %#v", result)
 	}
 }

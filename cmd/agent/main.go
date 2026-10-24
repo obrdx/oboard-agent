@@ -84,6 +84,8 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", defaultConfig(), "agent config path")
 	keyPath := flag.String("key", "", "stealth key file; decrypts the encrypted agent config and state")
+	controllerAddr := flag.String("controller-addr", "", "AgentLink listener host:port")
+	controllerPin := flag.String("controller-pin", "", "AgentLink certificate SHA-256 pin")
 	controllerURL := flag.String("controller", "", "controller URL")
 	enrollOnly := flag.Bool("enroll-only", false, "enroll, save config, and exit")
 	stateDir := flag.String("state-dir", agent.DefaultStateDir(), "agent state directory")
@@ -154,6 +156,12 @@ func main() {
 		cfg = loaded
 	}
 	cfg.ConfigPath = *configPath
+	if *controllerAddr != "" {
+		cfg.ControllerAddr = *controllerAddr
+	}
+	if *controllerPin != "" {
+		cfg.ControllerCertSHA256 = *controllerPin
+	}
 	if *controllerURL != "" {
 		cfg.ControllerURL = *controllerURL
 	}
@@ -226,8 +234,8 @@ func main() {
 	ctx, serviceDone := runUnderServiceManager(ctx, runner.Config().AgentService)
 	defer serviceDone()
 	if enrollToken != "" {
-		if cfg.ControllerURL == "" && (cfg.Stealth == nil || cfg.Stealth.ControllerAddr == "") {
-			log.Fatal("-controller is required when OBOARD_ENROLL_TOKEN is set")
+		if runner.Config().ControllerAddr == "" {
+			log.Fatal("-controller-addr and -controller-pin are required when OBOARD_ENROLL_TOKEN is set")
 		}
 		if err := runner.Enroll(ctx, enrollToken); err != nil {
 			log.Fatal(err)

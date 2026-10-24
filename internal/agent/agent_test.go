@@ -67,7 +67,7 @@ func TestEnrollTimeoutPreservesBootstrapCoreConfig(t *testing.T) {
 	defer server.Close()
 
 	configPath := filepath.Join(t.TempDir(), "agent.json")
-	runner := New(Config{
+	runner := newTestRunner(t, Config{
 		ConfigPath:              configPath,
 		ControllerURL:           server.URL,
 		StateDir:                "/var/lib/oboard-agent",
@@ -100,7 +100,7 @@ func TestEnrollSuccessPersistsCredentialsAndCoreConfig(t *testing.T) {
 	defer server.Close()
 
 	configPath := filepath.Join(t.TempDir(), "agent.json")
-	runner := New(Config{
+	runner := newTestRunner(t, Config{
 		ConfigPath:              configPath,
 		ControllerURL:           server.URL,
 		StateDir:                "/var/lib/oboard-agent",
@@ -353,7 +353,7 @@ func TestUpdateAgentControllerURLReportsResultThroughNewBasePath(t *testing.T) {
 	}))
 	defer controller.Close()
 	configPath := filepath.Join(t.TempDir(), "agent.json")
-	runner := New(Config{
+	runner := newTestRunner(t, Config{
 		ControllerURL:           controller.URL + "/old",
 		AgentID:                 "agent-1",
 		AgentToken:              "token-1",
@@ -389,7 +389,7 @@ func TestUpdateAgentControllerURLReportsResultThroughNewBasePath(t *testing.T) {
 func TestConnectReportsAppliedConfigurationOnConnectAndHeartbeat(t *testing.T) {
 	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
 	stateDir := t.TempDir()
-	r := New(Config{ControllerURL: "", AgentID: "agent-applied", AgentToken: "agent-token", ServerID: 1, StateDir: stateDir, CommandTimeoutSeconds: 1})
+	r := newTestRunner(t, Config{ControllerURL: "", AgentID: "agent-applied", AgentToken: "agent-token", ServerID: 1, StateDir: stateDir, CommandTimeoutSeconds: 1})
 	payload := []byte(`{"version":51}`)
 	if err := r.persistAppliedVersion(model.AgentTaskTypeApplyDeployment, 51, payload); err != nil {
 		t.Fatal(err)
@@ -440,7 +440,7 @@ func TestConnectReportsAppliedConfigurationOnConnectAndHeartbeat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- r.connect(ctx) }()
+	go func() { done <- r.connectTestControl(ctx) }()
 	select {
 	case seen := <-reports:
 		if len(seen) != 2 {
@@ -503,10 +503,10 @@ func TestConnectClosesSocketWhenTaskResultReportFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir()})
+	r := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir()})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := r.connect(ctx); err == nil {
+	if err := r.connectTestControl(ctx); err == nil {
 		t.Fatal("expected task result report error")
 	}
 	select {
@@ -561,10 +561,10 @@ func TestConnectAcknowledgesReportedTaskOnWebSocket(t *testing.T) {
 	}))
 	defer server.Close()
 
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir()})
+	r := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir()})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	connectErr := r.connect(ctx)
+	connectErr := r.connectTestControl(ctx)
 	select {
 	case message := <-ack:
 		if message["type"] != "task_ack" || message["task_id"] != float64(task.ID) {
@@ -621,7 +621,7 @@ func TestConnectSendsPresenceWhileTaskAcknowledgementIsInFlight(t *testing.T) {
 	}))
 	defer server.Close()
 
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir(), ServerID: task.ServerID, ConnectionAuditEnabled: true})
+	r := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir(), ServerID: task.ServerID, ConnectionAuditEnabled: true})
 	// Presence events exist only while detail collection is allowed; the light
 	// default keeps a session accounting-only and emits nothing to deliver. The
 	// policy matches the one the hello carries, so the session started here
@@ -632,7 +632,7 @@ func TestConnectSendsPresenceWhileTaskAcknowledgementIsInFlight(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	connectDone := make(chan error, 1)
-	go func() { connectDone <- r.connect(ctx) }()
+	go func() { connectDone <- r.connectTestControl(ctx) }()
 	select {
 	case seen := <-result:
 		if !seen["task_ack"] || !seen["presence_delta"] {
@@ -689,11 +689,11 @@ func TestConnectRejectsLegacyTaskSignatureVersion(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir(), ServerID: task.ServerID})
+	r := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir(), ServerID: task.ServerID})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- r.connect(ctx) }()
+	go func() { done <- r.connectTestControl(ctx) }()
 	select {
 	case report := <-reported:
 		if report.TaskID != task.ID || report.Status != "failed" || !strings.Contains(report.ResultJSON, "signature version 1") {
@@ -752,14 +752,14 @@ func TestConnectKeepsControlChannelWhenLatencyPlanIsRejected(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "agent-token", StateDir: t.TempDir(), ServerID: 3})
+	r := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "agent-token", StateDir: t.TempDir(), ServerID: 3})
 	if err := r.setLatencyProbePlan(current); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- r.connect(ctx) }()
+	go func() { done <- r.connectTestControl(ctx) }()
 	select {
 	case <-health:
 	case err := <-done:
@@ -1223,7 +1223,7 @@ func TestEmbeddedCoreTrafficPoliciesUseUserIdentity(t *testing.T) {
 func TestApplyCoreConfigSkipsRollbackAndPersistsVersion(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"}
-	r := New(cfg)
+	r := newTestRunner(t, cfg)
 	newConfig := `{"log":{"level":"warn"}}`
 	if _, err := r.applyCoreConfigTask(20, model.ApplyCoreConfigTaskPayload{Config: newConfig}); err != nil {
 		t.Fatal(err)
@@ -1238,7 +1238,7 @@ func TestApplyCoreConfigSkipsRollbackAndPersistsVersion(t *testing.T) {
 		t.Fatalf("older config changed current file: %s", current)
 	}
 
-	restarted := New(cfg)
+	restarted := newTestRunner(t, cfg)
 	// The watermark survives a restart, so the rollback is still skipped rather
 	// than applied — the guard lives on disk, not in process memory.
 	afterRestart, err := restarted.applyCoreConfigTask(19, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"error"}}`})
@@ -1256,11 +1256,11 @@ func TestFamilySelectorCoreConfigUsesPersistentVersionGate(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"}
 	familyConfig := `{"outbounds":[{"type":"direct","tag":"family-v4"},{"type":"direct","tag":"family-v6"},{"type":"family-selector","tag":"family","ipv4_outbound":"family-v4","ipv6_outbound":"family-v6","strategy":"prefer_ipv4","fallback":true}]}`
-	runner := New(cfg)
+	runner := newTestRunner(t, cfg)
 	if _, err := runner.applyCoreConfigTask(30, model.ApplyCoreConfigTaskPayload{Config: familyConfig}); err != nil {
 		t.Fatal(err)
 	}
-	restarted := New(cfg)
+	restarted := newTestRunner(t, cfg)
 	result, err := restarted.applyCoreConfigTask(30, model.ApplyCoreConfigTaskPayload{Config: familyConfig})
 	if err != nil || result["idempotent_replay"] != true {
 		t.Fatalf("family-selector same-version replay was not idempotent: result=%#v err=%v", result, err)
@@ -1656,7 +1656,7 @@ func TestCoreBinaryMustLiveInSystemDirectory(t *testing.T) {
 // itself permission to install binaries it serves.
 func TestControllerCannotGrantPanelUpdateConsent(t *testing.T) {
 	dir := t.TempDir()
-	runner := New(Config{
+	runner := newTestRunner(t, Config{
 		ConfigPath:       filepath.Join(dir, "agent.json"),
 		StateDir:         filepath.Join(dir, "state"),
 		AgentID:          "agent-1",
@@ -1677,7 +1677,7 @@ func TestControllerCannotGrantPanelUpdateConsent(t *testing.T) {
 	}
 
 	// Withdrawing consent remains possible.
-	granted := New(Config{
+	granted := newTestRunner(t, Config{
 		ConfigPath:       filepath.Join(dir, "agent2.json"),
 		StateDir:         filepath.Join(dir, "state2"),
 		AgentID:          "agent-2",
@@ -1752,13 +1752,13 @@ func TestAgentProcessHelper(t *testing.T) {
 		return
 	}
 	serverID := int64(1)
-	r := New(Config{
+	r := newTestRunner(t, Config{
 		ControllerURL: os.Getenv("OBOARD_AGENT_PROCESS_CONTROLLER"), AgentID: "agent-process", AgentToken: os.Getenv("OBOARD_AGENT_PROCESS_TOKEN"),
 		ServerID: serverID, StateDir: os.Getenv("OBOARD_AGENT_PROCESS_STATE"), TimeSyncCommand: "none", ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large",
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	if err := r.connect(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := r.connectTestControl(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 }
@@ -1884,11 +1884,11 @@ func TestConnectExecutesDeploymentAndReportsAppliedMetadata(t *testing.T) {
 	}))
 	defer server.Close()
 
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, ServerID: 1, StateDir: stateDir, TimeSyncCommand: "none", ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	r := newTestRunner(t, Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, ServerID: 1, StateDir: stateDir, TimeSyncCommand: "none", ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	connectDone := make(chan error, 1)
-	go func() { connectDone <- r.connect(ctx) }()
+	go func() { connectDone <- r.connectTestControl(ctx) }()
 	select {
 	case result := <-resultCh:
 		if result.TaskID != task.ID || result.Status != "succeeded" || result.HealthReport == nil {

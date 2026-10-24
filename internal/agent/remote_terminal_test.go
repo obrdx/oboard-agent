@@ -131,7 +131,7 @@ func TestInteractivePrepareUsesFreshControllerTime(t *testing.T) {
 	}
 	select {
 	case payload := <-got:
-		if payload["reason"] != interactiveReasonURLFailed {
+		if payload["reason"] != interactiveReasonAgentLinkConfigInvalid {
 			t.Fatalf("prepare did not pass validation: %#v", payload)
 		}
 	case <-time.After(5 * time.Second):
@@ -192,7 +192,7 @@ func TestInteractiveNonceReplayIgnoresCorrectedClockJumps(t *testing.T) {
 	}
 }
 
-func TestInteractiveSessionReportsURLFailure(t *testing.T) {
+func TestInteractiveSessionReportsAgentLinkConfigFailure(t *testing.T) {
 	dir := t.TempDir()
 	runner := New(Config{
 		StateDir: dir, CommandTimeoutSeconds: 20, ResourceProfile: "small", TimeCorrectionMode: "off",
@@ -224,7 +224,7 @@ func TestInteractiveSessionReportsURLFailure(t *testing.T) {
 	}
 	select {
 	case payload := <-got:
-		if payload["type"] != "interactive_failed" || payload["reason"] != interactiveReasonURLFailed {
+		if payload["type"] != "interactive_failed" || payload["reason"] != interactiveReasonAgentLinkConfigInvalid {
 			t.Fatalf("url failure payload = %#v", payload)
 		}
 	case <-time.After(5 * time.Second):
