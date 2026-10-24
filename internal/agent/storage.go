@@ -133,11 +133,11 @@ func logBudgetForProfile(profile StorageProfile, explicitAgentMax, explicitAgent
 	var defAgentMax, defAgentBackups, defCoreMax, defCoreBackups int
 	switch profile {
 	case StorageProfileTiny:
-		defAgentMax, defAgentBackups, defCoreMax, defCoreBackups = 2, 1, 8, 1
+		defAgentMax, defAgentBackups, defCoreMax, defCoreBackups = 1, 1, 4, 1
 	case StorageProfileSmall:
-		defAgentMax, defAgentBackups, defCoreMax, defCoreBackups = 4, 2, 16, 2
+		defAgentMax, defAgentBackups, defCoreMax, defCoreBackups = 2, 2, 8, 2
 	default:
-		defAgentMax, defAgentBackups, defCoreMax, defCoreBackups = 16, 3, 64, 3
+		defAgentMax, defAgentBackups, defCoreMax, defCoreBackups = 4, 3, 16, 3
 	}
 	if explicitAgentMax != nil {
 		agentMax = *explicitAgentMax
