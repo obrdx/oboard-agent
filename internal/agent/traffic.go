@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -208,34 +210,99 @@ type trafficReportResponse struct {
 
 func (r *Runner) startTrafficLoop(ctx context.Context) {
 	// #nosec G118 -- loopCtx is the caller's lifecycle context; only the final bounded flush uses a fresh timeout after cancellation.
-	go func(loopCtx context.Context) {
-		ticker := time.NewTicker(min(r.resources.TrafficReportInterval(), 30*time.Second))
-		defer ticker.Stop()
-		for {
-			// A failed cycle means the Controller returned no policies, so no
-			// lease was renewed. Swallowing that error is how a node goes
-			// quiet: it keeps serving until every user's current lease is
-			// spent, then refuses connections with nothing recorded anywhere.
-			r.noteTrafficReportOutcome(r.collectAndReportTraffic(loopCtx))
-			if r.Config().ConnectionAuditEnabled {
-				_ = r.collectAndReportAccountActivity(loopCtx)
-				r.collectDiagnosticActivity(loopCtx)
-			}
+	go r.runTrafficLoop(ctx)
+}
+
+func (r *Runner) runTrafficLoop(loopCtx context.Context) {
+	period := trafficSchedulePeriod(r.resources.TrafficReportInterval())
+	cfg := r.Config()
+	anchor := time.Now()
+	next := anchor.Add(trafficInitialDelay(anchor, period, trafficPhase(cfg.AgentID, cfg.ServerID, period)))
+	timer := time.NewTimer(time.Until(next))
+	defer timer.Stop()
+	for {
+		// A failed cycle means the Controller returned no policies, so no
+		// lease was renewed. Swallowing that error is how a node goes
+		// quiet: it keeps serving until every user's current lease is
+		// spent, then refuses connections with nothing recorded anywhere.
+		r.noteTrafficReportOutcome(r.collectAndReportTraffic(loopCtx))
+		if r.Config().ConnectionAuditEnabled {
+			_ = r.collectAndReportAccountActivity(loopCtx)
+			r.collectDiagnosticActivity(loopCtx)
+		}
+		latest := r.Config()
+		if latest.AgentID != cfg.AgentID || latest.ServerID != cfg.ServerID {
+			cfg = latest
+			anchor = time.Now()
+			next = anchor.Add(trafficInitialDelay(anchor, period, trafficPhase(cfg.AgentID, cfg.ServerID, period)))
+		}
+		next = trafficNextDeadline(next, time.Now(), period)
+		if !timer.Stop() {
 			select {
-			case <-loopCtx.Done():
-				flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = r.persistTrafficCheckpointBeforeRuntimeTransition(flushCtx)
-				_ = r.collectAndReportTraffic(flushCtx)
-				if r.Config().ConnectionAuditEnabled {
-					_ = r.collectAndReportAccountActivity(flushCtx)
-					r.collectDiagnosticActivity(flushCtx)
-				}
-				cancel()
-				return
-			case <-ticker.C:
+			case <-timer.C:
+			default:
 			}
 		}
-	}(ctx)
+		timer.Reset(time.Until(next))
+		select {
+		case <-loopCtx.Done():
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = r.persistTrafficCheckpointBeforeRuntimeTransition(flushCtx)
+			_ = r.collectAndReportTraffic(flushCtx)
+			if r.Config().ConnectionAuditEnabled {
+				_ = r.collectAndReportAccountActivity(flushCtx)
+				r.collectDiagnosticActivity(flushCtx)
+			}
+			cancel()
+			return
+		case <-r.trafficReportWake:
+		// Recovery is serialized with periodic reports and does not move their phase.
+		case <-timer.C:
+		}
+	}
+}
+
+// Initial wall-clock alignment gives restarts the same phase. Subsequent
+// deadlines retain Go's monotonic clock and skip missed slots after a slow call.
+func trafficSchedulePeriod(period time.Duration) time.Duration {
+	if period <= 0 {
+		return 30 * time.Second
+	}
+	return min(period, 30*time.Second)
+}
+func trafficPhase(agentID string, serverID int64, period time.Duration) time.Duration {
+	window := min(10*time.Second, period/3)
+	if window <= 0 {
+		return 0
+	}
+	sum := sha256.Sum256([]byte(agentID + "\x00" + strconv.FormatInt(serverID, 10)))
+	return time.Duration(binary.BigEndian.Uint64(sum[:8]) % uint64(window))
+}
+func trafficInitialDelay(at time.Time, period, offset time.Duration) time.Duration {
+	if period <= 0 {
+		return 0
+	}
+	position := time.Duration(at.UnixNano() % int64(period))
+	if position < 0 {
+		position += period
+	}
+	delay := (offset - position) % period
+	if delay <= 0 {
+		delay += period
+	}
+	return delay
+}
+func trafficNextDeadline(next, at time.Time, period time.Duration) time.Time {
+	if !next.After(at) {
+		next = next.Add((at.Sub(next)/period + 1) * period)
+	}
+	return next
+}
+func (r *Runner) wakeTrafficReport() {
+	select {
+	case r.trafficReportWake <- struct{}{}:
+	default:
+	}
 }
 
 func (r *Runner) collectAndReportTraffic(ctx context.Context) error {

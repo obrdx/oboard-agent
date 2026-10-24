@@ -104,6 +104,7 @@ type Runner struct {
 	mu                          sync.Mutex
 	probeMu                     sync.Mutex
 	trafficMu                   sync.Mutex
+	trafficReportWake           chan struct{}
 	connectionAuditMu           sync.Mutex
 	latencyProbeMu              sync.Mutex
 	metricReportMu              sync.Mutex
@@ -223,7 +224,7 @@ func New(cfg Config) *Runner {
 	if profile == StorageProfileAuto {
 		profile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
 	}
-	runner := &Runner{coreClient: unixHTTPClient(coreSocketOrDefault(cfg.CoreSocket)), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: platformLogDir(), logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled, clock.Now), clock: clock}
+	runner := &Runner{coreClient: unixHTTPClient(coreSocketOrDefault(cfg.CoreSocket)), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: platformLogDir(), logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), trafficReportWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled, clock.Now), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	runner.refreshLogLevel()
@@ -1432,6 +1433,7 @@ func (r *Runner) runControlSession(ctx context.Context, conn controlConn) error 
 			// A reconnect may have missed a revoke pushed while the link was
 			// down; the independent lane pulls the current snapshot now.
 			r.wakeAuthorizationSync()
+			r.wakeTrafficReport()
 			r.wakeUsersSync()
 		case model.AgentControlAuthorizationUpdate:
 			var envelope model.AuthorizationEnvelope
