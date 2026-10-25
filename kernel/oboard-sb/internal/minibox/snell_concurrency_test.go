@@ -55,6 +55,51 @@ func snellPayloadTarget(t *testing.T, payload []byte) M.Socksaddr {
 	return M.SocksaddrFromNet(ln.Addr())
 }
 
+func reserveSnellTestPorts(t *testing.T, count int) ([]int, func()) {
+	t.Helper()
+	// Keep every reservation open so ephemeral allocation cannot return one port twice.
+	var listeners []net.Listener
+	release := func() {
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
+		listeners = nil
+	}
+	t.Cleanup(release)
+	ports := make([]int, count)
+	for i := range ports {
+		ln, err := net.Listen("tcp", "[::]:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, ln)
+		ports[i] = ln.Addr().(*net.TCPAddr).Port
+	}
+	return ports, release
+}
+
+func TestReserveSnellTestPorts(t *testing.T) {
+	ports, release := reserveSnellTestPorts(t, 2)
+	if ports[0] == ports[1] {
+		t.Fatal("reserved ports must be distinct")
+	}
+	for _, port := range ports {
+		ln, err := net.Listen("tcp", fmt.Sprintf("[::]:%d", port))
+		if err == nil {
+			_ = ln.Close()
+			t.Fatalf("reserved port %d was available before release", port)
+		}
+	}
+	release()
+	for _, port := range ports {
+		ln, err := net.Listen("tcp", fmt.Sprintf("[::]:%d", port))
+		if err != nil {
+			t.Fatalf("bind released port %d: %v", port, err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+	}
+}
+
 func TestSnellConcurrentPayloadRamp(t *testing.T) {
 	levels, counts := []int{32, 128}, []int{1, 64}
 	sources := []bool{false}
@@ -78,7 +123,8 @@ func TestSnellConcurrentPayloadRamp(t *testing.T) {
 					for _, multisource := range sources {
 						t.Run(fmt.Sprintf("v%d/ss_%t/reuse_%t/users_%d/multi_source_%t", version, chain, reuse, count, multisource), func(t *testing.T) {
 							target := snellPayloadTarget(t, payload)
-							port, ssPort := freeTCPPort(t), freeTCPPort(t)
+							ports, releasePorts := reserveSnellTestPorts(t, 2)
+							port, ssPort := ports[0], ports[1]
 							inbounds := []map[string]any{{"type": "snell", "tag": "in-1", "version": version, "auth_mode": "multi_psk", "listen": "::", "listen_port": port, "users": []any{}}}
 							outbounds := []map[string]any{{"type": "direct", "tag": "direct"}}
 							outbound := "direct"
@@ -109,6 +155,7 @@ func TestSnellConcurrentPayloadRamp(t *testing.T) {
 							defer b.Close()
 							tracker := AttachRuntimeTrackers(ctx, RuntimeMetadata{RuntimeUsers: &RuntimeUsersMeta{Inbounds: []string{"in-1"}}})
 							users := NewRuntimeUsers(filepath.Join(t.TempDir(), "users.json"), nil, b, tracker, []string{"in-1"})
+							releasePorts()
 							if err := b.Start(); err != nil {
 								t.Fatal(err)
 							}
