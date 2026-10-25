@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Derived from sing-box v1.14.3; see internal/boxnet/UPSTREAM.
+// Derived from sing-box v1.14.4; see internal/boxnet/UPSTREAM.
 
 package dialer
 
@@ -108,7 +108,7 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 		return nil, err
 	}
 	if d.parallel {
-		return N.DialParallel(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, d.fallbackDelay)
+		return N.DialParallel(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), d.fallbackDelay)
 	} else {
 		return N.DialSerial(ctx, d.dialer, network, destination, addresses)
 	}
@@ -159,7 +159,7 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 		fallbackDelay = d.fallbackDelay
 	}
 	if d.parallel {
-		return DialParallelNetwork(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+		return DialParallelNetwork(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
 	} else {
 		return DialSerialNetwork(ctx, d.dialer, network, destination, addresses, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
 	}

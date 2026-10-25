@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Derived from sing-box v1.14.3; see internal/boxnet/UPSTREAM.
+// Derived from sing-box v1.14.4; see internal/boxnet/UPSTREAM.
 
 package shadowsocks
 

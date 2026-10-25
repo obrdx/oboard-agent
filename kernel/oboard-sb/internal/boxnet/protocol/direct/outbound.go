@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Derived from sing-box v1.14.3; see internal/boxnet/UPSTREAM.
+// Derived from sing-box v1.14.4; see internal/boxnet/UPSTREAM.
 
 package direct
 
@@ -84,8 +84,9 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		return nil, E.New("Proxy Protocol is deprecated and removed in sing-box 1.6.0")
 	}
 	if defaultDialer, isDefaultDialer := common.Cast[*dialer.DefaultDialer](outbound.dialer); isDefaultDialer {
+		icmpControl := defaultDialer.ICMPControl()
 		outbound.icmpPort = ping.NewPort(ctx, logger, func(destination netip.Addr) control.Func {
-			return defaultDialer.DialerForICMPDestination(destination).Control
+			return icmpControl
 		}, 0)
 	}
 	return outbound, nil
@@ -187,6 +188,10 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 
 func (h *Outbound) PreMatchFlow(network string, destination netip.Addr) adapter.PreMatchAction {
 	if network == N.NetworkICMP && h.icmpPort != nil {
+		if h.isMyLoopbackAddress(destination) {
+			h.logger.Error("reject ", network, " connection to ", destination, ": loopback connection to TUN range")
+			return adapter.PreMatchReject
+		}
 		return adapter.PreMatchFlow
 	}
 	return adapter.PreMatchContinue
@@ -242,6 +247,9 @@ func (h *Outbound) DialParallelNetwork(ctx context.Context, network string, dest
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+	}
+	if fallbackDelay == 0 {
+		fallbackDelay = h.fallbackDelay
 	}
 	return dialer.DialParallelNetwork(ctx, h.dialer, network, destination, destinationAddresses, len(destinationAddresses) > 0 && destinationAddresses[0].Is6(), networkStrategy, networkType, fallbackNetworkType, fallbackDelay)
 }
