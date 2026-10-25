@@ -17,6 +17,22 @@ func registerAuthorizationHandler(mux *http.ServeMux, listen string, tracker *mi
 	if !strings.HasPrefix(listen, "unix:") {
 		return
 	}
+	mux.HandleFunc("/authorization/connectivity", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		var body struct {
+			Disconnected *bool `json:"disconnected"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Disconnected == nil {
+			http.Error(w, "invalid connectivity state", 400)
+			return
+		}
+		tracker.SetControllerDisconnected(*body.Disconnected)
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("/authorization/config", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", 405)

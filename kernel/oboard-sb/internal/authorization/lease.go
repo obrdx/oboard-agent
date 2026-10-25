@@ -30,13 +30,15 @@ const maxDeniedKeys = 65536
 // MaxLifetime after IssuedAt); Denied lists keys that must be refused even if
 // an older, still-unexpired lease granted them.
 type Lease struct {
-	Revision  int64             `json:"revision"`
-	Sequence  int64             `json:"sequence,omitempty"`
-	Digest    string            `json:"digest,omitempty"`
-	IssuedAt  string            `json:"issued_at"`
-	ExpiresAt string            `json:"expires_at,omitempty"`
-	Grants    map[string]string `json:"grants"`
-	Denied    []string          `json:"denied,omitempty"`
+	ContinueWhenDisconnected bool              `json:"continue_when_disconnected,omitempty"`
+	OfflineGrants            map[string]string `json:"offline_grants,omitempty"`
+	Revision                 int64             `json:"revision"`
+	Sequence                 int64             `json:"sequence,omitempty"`
+	Digest                   string            `json:"digest,omitempty"`
+	IssuedAt                 string            `json:"issued_at"`
+	ExpiresAt                string            `json:"expires_at,omitempty"`
+	Grants                   map[string]string `json:"grants"`
+	Denied                   []string          `json:"denied,omitempty"`
 }
 
 // window returns the [issued, expires) validity window of the lease.
@@ -74,6 +76,21 @@ func (l *Lease) Validate() error {
 			return errors.New("invalid authorization grant")
 		}
 	}
+	if len(l.OfflineGrants) > len(l.Grants) || (!l.ContinueWhenDisconnected && len(l.OfflineGrants) > 0) {
+		return errors.New("invalid offline authorization")
+	}
+	for key, raw := range l.OfflineGrants {
+		if _, ok := l.Grants[key]; !ok {
+			return errors.New("offline grant without authorization")
+		}
+		if raw != "" {
+			end, err := time.Parse(time.RFC3339Nano, raw)
+			grantEnd, _ := time.Parse(time.RFC3339Nano, l.Grants[key])
+			if err != nil || end.Before(grantEnd) {
+				return errors.New("invalid offline grant deadline")
+			}
+		}
+	}
 	for _, key := range l.Denied {
 		if key == "" || len(key) > 256 {
 			return errors.New("invalid authorization denial")
@@ -89,11 +106,36 @@ func (l *Lease) Allows(key string, now time.Time) bool {
 		return false
 	}
 	issued, expires, err := l.window()
-	if err != nil || now.Before(issued) || !now.Before(expires) {
+	if err != nil || now.Before(issued) {
 		return false
+	}
+	if !now.Before(expires) {
+		return l.offlineAllows(key, now)
 	}
 	end, err := time.Parse(time.RFC3339Nano, l.Grants[key])
 	return err == nil && !end.After(expires) && now.Before(end)
+}
+
+func (l *Lease) offlineAllows(key string, now time.Time) bool {
+	if l == nil || !l.ContinueWhenDisconnected {
+		return false
+	}
+	issued, _, err := l.window()
+	if err != nil || now.Before(issued) {
+		return false
+	}
+	if _, ok := l.Grants[key]; !ok {
+		return false
+	}
+	raw, ok := l.OfflineGrants[key]
+	if !ok {
+		return false
+	}
+	if raw == "" {
+		return true
+	}
+	end, err := time.Parse(time.RFC3339Nano, raw)
+	return err == nil && now.Before(end)
 }
 
 // NextExpiry returns the earliest instant after now at which some grant or
@@ -141,16 +183,17 @@ type Status struct {
 // Store never lets configuration replay or rollback replace a newer full
 // snapshot, and never lets any snapshot re-admit a denied key.
 type Store struct {
-	mu     sync.Mutex
-	path   string
+	mu   sync.Mutex
+	path string
 	// key encrypts the lease and deny files at rest when set (stealth mode).
-	key    []byte
-	loaded bool
-	err    error
-	lease  *Lease
-	denied map[string]deniedEntry
-	bootID string
-	now    func() time.Time
+	key          []byte
+	disconnected bool
+	loaded       bool
+	err          error
+	lease        *Lease
+	denied       map[string]deniedEntry
+	bootID       string
+	now          func() time.Time
 	// onChange is invoked (outside the lock) after the installed state changed.
 	onChange func()
 }
@@ -198,6 +241,13 @@ func clone(l *Lease) *Lease {
 	out.Grants = make(map[string]string, len(l.Grants))
 	for k, v := range l.Grants {
 		out.Grants[k] = v
+	}
+	out.OfflineGrants = nil
+	if l.OfflineGrants != nil {
+		out.OfflineGrants = make(map[string]string, len(l.OfflineGrants))
+		for k, v := range l.OfflineGrants {
+			out.OfflineGrants[k] = v
+		}
 	}
 	out.Denied = append([]string(nil), l.Denied...)
 	return &out
@@ -297,6 +347,32 @@ func (s *Store) Allows(key string, now time.Time) bool {
 	return s.lease.Allows(key, now)
 }
 
+// OfflineAllows permits local quota fallback only for explicitly authorized keys
+// while the control link is down or its signed snapshot can no longer renew.
+func (s *Store) OfflineAllows(key string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.load()
+	if s.err != nil || s.lease == nil {
+		return false
+	}
+	if _, denied := s.denied[key]; denied {
+		return false
+	}
+	_, expires, err := s.lease.window()
+	return err == nil && (s.disconnected || !now.Before(expires)) && s.lease.offlineAllows(key, now)
+}
+
+func (s *Store) SetDisconnected(disconnected bool) {
+	s.mu.Lock()
+	s.disconnected = disconnected
+	hook := s.onChange
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
 // Denied reports whether key is on the deny watermark.
 func (s *Store) Denied(key string) bool {
 	s.mu.Lock()
@@ -371,7 +447,7 @@ func (s *Store) updateLocked(incoming *Lease) (UpdateResult, func(), error) {
 		case orderOlder:
 			return UpdateResult{Superseded: true}, nil, nil
 		case orderEqual:
-			if !reflect.DeepEqual(candidate.Grants, s.lease.Grants) || candidate.Digest != s.lease.Digest {
+			if !reflect.DeepEqual(candidate.Grants, s.lease.Grants) || candidate.Digest != s.lease.Digest || candidate.ContinueWhenDisconnected != s.lease.ContinueWhenDisconnected || !reflect.DeepEqual(candidate.OfflineGrants, s.lease.OfflineGrants) {
 				return UpdateResult{}, nil, ErrConflict
 			}
 			if len(candidate.Denied) == 0 {
@@ -395,6 +471,7 @@ func (s *Store) updateLocked(incoming *Lease) (UpdateResult, func(), error) {
 			// A key both granted and denied in one snapshot is a Controller
 			// bug; deny wins because denial is the safe direction.
 			delete(candidate.Grants, key)
+			delete(candidate.OfflineGrants, key)
 		}
 		if len(s.denied) < maxDeniedKeys {
 			s.denied[key] = deniedEntry{Revision: candidate.Revision, At: now.Format(time.RFC3339Nano)}

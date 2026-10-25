@@ -1076,6 +1076,7 @@ func (r *Runner) connect(ctx context.Context) error {
 func (r *Runner) runControlSession(ctx context.Context, conn controlConn) error {
 	cfg := r.Config()
 	r.recordControllerLinkConnected(time.Now().UTC())
+	defer r.setControllerDisconnected(true)
 	logging.Debugf("controller connection peer: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
 	defer conn.Close()
 	connectionCtx, cancelConnection := context.WithCancel(ctx)
@@ -3729,6 +3730,7 @@ func (r *Runner) agentCapabilities(kernelCapabilities []string) []string {
 		"agentlink_v1",
 		model.AgentCapabilityTrafficPolicy,
 		model.AgentCapabilityAuthorizationControl,
+		"offline_service_control_v1",
 		model.AgentCapabilityRuntimeUsers,
 		"runtime_users_snell_psk_control_v1",
 		model.AgentCapabilityStealth, model.RuntimeSecurityCapability, model.ProxyDSCPCapability)

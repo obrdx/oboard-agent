@@ -235,3 +235,38 @@ func TestPersistedLeaseDoesNotPermitConfigToOmitAuthorization(t *testing.T) {
 		t.Fatal("config without authorization reused persisted grants")
 	}
 }
+
+func TestOfflineServiceKeepsTCPUDPAndEnforcesLocalTotal(t *testing.T) {
+	now := time.Now().UTC()
+	lease := &authorization.Lease{Revision: 1, IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"key": now.Add(5 * time.Minute).Format(time.RFC3339Nano)}, ContinueWhenDisconnected: true, OfflineGrants: map[string]string{"key": ""}}
+	tracker := newRateLimitTracker(RuntimeMetadata{Authorization: lease, RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": {UserID: 7, AuthorizationKey: "key", Billable: true, TrafficLimitBytes: 100, LeaseEnforced: true, LeaseBytes: 10}}}}, func() time.Time { return now })
+	state := tracker.stateForKey("user:alice")
+	client, server := net.Pipe()
+	defer client.Close()
+	wrapped := tracker.RoutedConnection(context.Background(), server, adapter.InboundContext{User: "alice"}, nil, nil)
+	defer wrapped.Close()
+	packet := &testPacketConn{}
+	udp := tracker.RoutedPacketConnection(context.Background(), packet, adapter.InboundContext{User: "alice"}, nil, nil)
+	defer udp.Close()
+	tracker.SetControllerDisconnected(true)
+	now = now.Add(time.Hour)
+	tracker.ReapAuthorization()
+	if packet.closed.Load() || state.deniedForConnection(true) {
+		t.Fatal("offline opt-in terminated authorized traffic")
+	}
+	state.addTraffic(10, 0)
+	if state.quotaDeniedFor(true) {
+		t.Fatal("offline allocation was not relaxed")
+	}
+	state.addTraffic(90, 0)
+	if !state.quotaDeniedFor(true) {
+		t.Fatal("offline mode bypassed local total quota")
+	}
+	if err := tracker.authorization.Deny([]string{"key"}, 2); err != nil {
+		t.Fatal(err)
+	}
+	tracker.ReapAuthorization()
+	if !packet.closed.Load() {
+		t.Fatal("offline mode bypassed revocation")
+	}
+}

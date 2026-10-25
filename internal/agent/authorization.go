@@ -50,6 +50,34 @@ func (r *Runner) authorizationAllows(key string) bool {
 	return r.authorizationState().Allows(key, now)
 }
 
+func (r *Runner) authorizationOfflineAllows(key string) bool {
+	now := time.Now()
+	if r.clock != nil {
+		now = r.clock.Now()
+	}
+	return r.authorizationState().OfflineAllows(key, now)
+}
+
+func (r *Runner) setControllerDisconnected(disconnected bool) {
+	r.authorizationApplyMu.Lock()
+	defer r.authorizationApplyMu.Unlock()
+	r.authorizationState().SetDisconnected(disconnected)
+	body, _ := json.Marshal(map[string]bool{"disconnected": disconnected})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://oboard-sb/authorization/connectivity", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := r.coreAPIClient().Do(req)
+	if err != nil {
+		return
+	}
+	defer res.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+}
+
 // appliedAuthorization is the opaque confirmation identity reported to the
 // Controller in health reports, pull requests, and task results.
 func (r *Runner) appliedAuthorization() *model.AuthorizationAppliedSnapshot {
@@ -182,6 +210,16 @@ type authorizationApplyOutcome struct {
 // only authorizationApplyMu: a long deployment, the traffic reporter, and the
 // kernel lifecycle lock never block a revoke.
 func (r *Runner) applyAuthorization(ctx context.Context, lease *model.AuthorizationLease) (outcome authorizationApplyOutcome, resultErr error) {
+	if lease != nil && lease.ContinueWhenDisconnected {
+		_, capabilities := r.coreIdentity()
+		supported := false
+		for _, capability := range capabilities {
+			supported = supported || capability == "offline_service_v1"
+		}
+		if !supported {
+			return outcome, errors.New("offline service requires an updated kernel with offline_service_v1")
+		}
+	}
 	stage := "persist"
 	revision, count := int64(0), 0
 	if lease != nil {
@@ -377,6 +415,7 @@ func (r *Runner) applyAuthorizationEnvelope(ctx context.Context, envelope model.
 	// Confirmed means every runtime accepted the snapshot. Whether the kernel's
 	// installed identity was read back is reported separately so a kernel
 	// without the status endpoint is labelled, not treated as a failure.
+	r.setControllerDisconnected(false)
 	ack.Confirmed = true
 	if ack.Runtimes == nil {
 		ack.Runtimes = map[string]string{}
@@ -453,6 +492,7 @@ func (r *Runner) pullAuthorization(ctx context.Context, reason string) {
 	}
 	var envelope model.AuthorizationEnvelope
 	if err := r.controllerJSON(pullCtx, http.MethodGet, "/api/v1/agent/authorization", headers, nil, &envelope, true); err != nil {
+		r.setControllerDisconnected(true)
 		r.noteSyncOutcome("authorization_pull", reason, 0, 0, err)
 		return
 	}

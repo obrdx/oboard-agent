@@ -70,6 +70,7 @@ type sshInboundManager struct {
 
 type managedSSHInbound struct {
 	authorizationAllows func(string) bool
+	offlineAllows       func(string) bool
 	plan                model.SSHInbound
 	listener            net.Listener
 	auth                map[string]sshInboundCredential
@@ -106,6 +107,7 @@ type sshInboundCounter struct {
 	acknowledgedUpload   atomic.Int64
 	acknowledgedDownload atomic.Int64
 	usage                *sshInboundUserUsage
+	offlineAllows        func() bool
 }
 
 type sshInboundUserUsage struct {
@@ -929,6 +931,10 @@ func (r *Runner) newSSHInboundManager(plan model.SSHInboundPlan) (*sshInboundMan
 			return nil, err
 		}
 		inbound.authorizationAllows = r.authorizationAllows
+		inbound.offlineAllows = r.authorizationOfflineAllows
+		for userID, counter := range inbound.counters {
+			counter.offlineAllows = func() bool { return inbound.offlineForUser(userID) }
+		}
 		manager.listeners[planInbound.InboundID] = inbound
 	}
 	return manager, nil
@@ -993,7 +999,7 @@ func (m *sshInboundManager) ensureSSHInboundCounters(inbound *managedSSHInbound,
 			usage = &sshInboundUserUsage{periods: map[string]*sshInboundUsagePeriod{}}
 			m.usage[user.UserID] = usage
 		}
-		inbound.counters[user.UserID] = &sshInboundCounter{epoch: newTrafficCounterEpoch(), usage: usage}
+		inbound.counters[user.UserID] = &sshInboundCounter{epoch: newTrafficCounterEpoch(), usage: usage, offlineAllows: func() bool { return inbound.offlineForUser(user.UserID) }}
 	}
 }
 
@@ -1162,7 +1168,7 @@ func newManagedSSHInbound(plan model.SSHInbound, usageByUser map[int64]*sshInbou
 			usage = &sshInboundUserUsage{periods: map[string]*sshInboundUsagePeriod{}}
 			usageByUser[user.UserID] = usage
 		}
-		counter := &sshInboundCounter{epoch: newTrafficCounterEpoch(), usage: usage}
+		counter := &sshInboundCounter{epoch: newTrafficCounterEpoch(), usage: usage, offlineAllows: func() bool { return inbound.offlineForUser(user.UserID) }}
 		if policy, ok := sshInboundPolicyForUser(plan.Policies, user.UserID); ok {
 			counter.setPolicy(policy)
 		}
@@ -1730,6 +1736,20 @@ func agentClampedMonthDay(year int, month time.Month, day int) int {
 	return day
 }
 
+func (m *managedSSHInbound) offlineForUser(userID int64) bool {
+	if m.offlineAllows == nil {
+		return false
+	}
+	m.authMu.RLock()
+	defer m.authMu.RUnlock()
+	for _, credential := range m.auth {
+		if credential.userID == userID && credential.credentialStatus == "active" && m.offlineAllows(credential.authorizationKey) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *sshInboundCounter) allowNewConnection() bool { return !c.quotaExceeded() }
 func (c *sshInboundCounter) allowTransfer() bool {
 	return !c.quotaExceeded()
@@ -1744,7 +1764,7 @@ func (c *sshInboundCounter) quotaExceeded() bool {
 		return false
 	}
 	capBytes := policy.TrafficLimitBytes
-	if policy.LeaseEnforced {
+	if policy.LeaseEnforced && (c.offlineAllows == nil || !c.offlineAllows()) {
 		leaseBytes := policy.LeaseBytes
 		if leaseBytes < 0 {
 			leaseBytes = 0

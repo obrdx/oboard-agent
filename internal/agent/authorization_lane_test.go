@@ -54,6 +54,25 @@ func TestAuthorizationEnvelopeLaneAppliesVerifiesAndRejectsForgeries(t *testing.
 		t.Fatal("granted key not allowed after apply")
 	}
 
+	offline := grant
+	offline.Revision = 2
+	offline.ContinueWhenDisconnected = true
+	offline.OfflineGrants = map[string]string{"k-alice": ""}
+	unsupported := r.applyAuthorizationEnvelope(context.Background(), signedTestEnvelope(t, "lane-token", 5, "offline-unsupported", offline))
+	if unsupported.Confirmed || unsupported.Error == "" {
+		t.Fatal("old kernel confirmed offline policy")
+	}
+	installed, err := r.authorizationState().Snapshot()
+	if err != nil || installed.ContinueWhenDisconnected {
+		t.Fatal("unsupported offline policy was persisted")
+	}
+	tampered := signedTestEnvelope(t, "lane-token", 5, "offline-forged", grant)
+	modified, _ := json.Marshal(offline)
+	tampered.LeaseJSON = string(modified)
+	if ack := r.applyAuthorizationEnvelope(context.Background(), tampered); ack.Confirmed || ack.Error == "" {
+		t.Fatal("unsigned offline opt-in accepted")
+	}
+
 	// A forged envelope (wrong key) is rejected and never confirmed; the ack
 	// still reports the identity the data plane holds.
 	forged := signedTestEnvelope(t, "other-token", 5, "m2", model.AuthorizationLease{Revision: 2, Sequence: 1, Digest: "d2", IssuedAt: issued.Add(time.Second).Format(time.RFC3339Nano), ExpiresAt: granted, Grants: map[string]string{}})

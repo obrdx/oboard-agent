@@ -55,6 +55,13 @@ func (t *RateLimitTracker) installAuthorizationStore(store *authorization.Store)
 	})
 }
 
+func (t *RateLimitTracker) SetControllerDisconnected(disconnected bool) {
+	if t.authorization != nil {
+		t.authorization.SetDisconnected(disconnected)
+	}
+	t.ReapAuthorization()
+}
+
 // AuthorizationUpdate is the body of POST /authorization/config: the lease to
 // install plus the Agent's full deny watermark, which the kernel merges into
 // its own so the two stay identical after every apply.

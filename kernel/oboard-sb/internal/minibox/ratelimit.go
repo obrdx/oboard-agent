@@ -371,6 +371,11 @@ func (s *runtimeState) denied() bool {
 		return true
 	}
 	config := s.currentConfig()
+	if s.authorization != nil && s.authorization.OfflineAllows(config.policy.AuthorizationKey, s.now()) {
+		local := *config
+		local.policy.LeaseEnforced = false
+		return runtimeConfigDenied(&local, s.unacknowledged(config))
+	}
 	return runtimeConfigDenied(config, s.unacknowledged(config))
 }
 
@@ -420,6 +425,11 @@ func (s *runtimeState) quotaDeniedFor(admitted bool) bool {
 		return !admitted
 	default:
 		return true
+	}
+	if s.authorization != nil && s.authorization.OfflineAllows(config.policy.AuthorizationKey, s.now()) {
+		local := *config
+		local.policy.LeaseEnforced = false
+		return runtimeConfigDenied(&local, s.unacknowledged(config))
 	}
 	return runtimeConfigDenied(config, s.unacknowledged(config))
 }

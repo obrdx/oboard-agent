@@ -702,3 +702,21 @@ func TestRestoreSSHInboundsKeepsListenersWhenCoreAPIIsDown(t *testing.T) {
 		t.Fatal("deferred reconcile stayed pending after it succeeded")
 	}
 }
+
+func TestSSHOfflineServicePreservesQuota(t *testing.T) {
+	offline := false
+	counter := &sshInboundCounter{offlineAllows: func() bool { return offline }}
+	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, TrafficLimitBytes: 100, LeaseEnforced: true, LeaseBytes: 10})
+	counter.addTraffic(true, 10)
+	if !counter.quotaExceeded() {
+		t.Fatal("online allocation not enforced")
+	}
+	offline = true
+	if counter.quotaExceeded() {
+		t.Fatal("offline fallback not applied")
+	}
+	counter.addTraffic(true, 90)
+	if !counter.quotaExceeded() {
+		t.Fatal("offline total quota not enforced")
+	}
+}
