@@ -1013,6 +1013,9 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 			stream.LastError = "controller epoch does not match local counters"
 			continue
 		}
+		sameIdentity := checkpoint.CounterEpoch != "" && checkpoint.CounterEpoch == stream.CounterEpoch &&
+			checkpoint.PeriodKey != "" && checkpoint.PeriodKey == stream.PeriodKey && stream.SnapshotKey != ""
+		counterRegressed := stream.Status == trafficStatusCounterRegression
 		if checkpoint.CounterEpoch != "" {
 			stream.CounterEpoch = checkpoint.CounterEpoch
 		}
@@ -1023,6 +1026,20 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 		stream.AcceptedDownload = checkpoint.AcceptedDownload
 		if checkpoint.Status != "" {
 			stream.Status = checkpoint.Status
+			// A rejected range does not invalidate the Controller's checkpoint.
+			// Rebuild from it only when the local counters cover the same identity.
+			if sameIdentity && (checkpoint.Status == trafficStatusCheckpointGap || checkpoint.Status == trafficStatusCheckpointOverlap) {
+				switch {
+				case counterRegressed:
+					stream.Status = trafficStatusCounterRegression
+				case stream.ObservedUpload < checkpoint.AcceptedUpload || stream.ObservedDownload < checkpoint.AcceptedDownload:
+					stream.Status = trafficStatusCounterRegression
+					stream.LastError = "observed counters are below the accepted checkpoint"
+				default:
+					stream.Status = trafficStatusHealthy
+					stream.LastError = ""
+				}
+			}
 		} else if stream.Status == trafficStatusRecovering || stream.Status == trafficStatusStateCorrupt {
 			stream.Status = trafficStatusHealthy
 		}
