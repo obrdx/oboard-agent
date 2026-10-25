@@ -24,6 +24,7 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 const (
@@ -163,11 +164,11 @@ func validateLatencyProbeTarget(target model.LatencyProbeTarget, mode model.Late
 			return errors.New("地区目标必须包含省份和运营商")
 		}
 		if addr, err := netip.ParseAddr(host); err == nil {
-			if !validLatencyProbeIPv4(addr) || strings.TrimSpace(target.IP) != addr.String() {
-				return errors.New("地区目标必须是公网 IPv4 地址")
+			if (target.Kind == "regional" && !validLatencyProbeIPv4(addr)) || strings.TrimSpace(target.IP) != addr.String() {
+				return errors.New("目标 IP 地址无效")
 			}
-		} else if !validLatencyProbeHostname(host) || strings.TrimSpace(target.IP) != "" {
-			return errors.New("地区目标必须是公网 IPv4 地址或主机名")
+		} else if !(validLatencyProbeHostname(host) || (target.Kind == "custom" && validCustomProbeHostname(host))) || strings.TrimSpace(target.IP) != "" {
+			return errors.New("目标必须是 IP 地址或主机名")
 		}
 	default:
 		return errors.New("延迟目标类型无效")
@@ -205,13 +206,17 @@ func validLatencyProbeIPv4(addr netip.Addr) bool {
 }
 
 func validLatencyProbeHostname(host string) bool {
+	return validProbeHostname(host, false)
+}
+
+func validProbeHostname(host string, allowSingleLabel bool) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" || len(host) > 253 || strings.Contains(host, "..") {
 		return false
 	}
 	host = strings.TrimSuffix(host, ".")
 	labels := strings.Split(host, ".")
-	if len(labels) < 2 {
+	if !allowSingleLabel && len(labels) < 2 {
 		return false
 	}
 	for _, label := range labels {
@@ -223,6 +228,9 @@ func validLatencyProbeHostname(host string) bool {
 				return false
 			}
 		}
+	}
+	if allowSingleLabel && len(labels) == 1 {
+		return true
 	}
 	tld := labels[len(labels)-1]
 	if len(tld) < 2 {
@@ -236,12 +244,22 @@ func validLatencyProbeHostname(host string) bool {
 	return true
 }
 
+func validCustomProbeHostname(host string) bool {
+	return validProbeHostname(host, true)
+}
+
 func icmpProbeSamplesContext(ctx context.Context, host string, _ int, count int, interval, timeout time.Duration) ([]int64, []string) {
-	target, err := resolveLatencyProbeIPv4(ctx, host)
+	target, err := resolveLatencyProbeIP(ctx, host)
 	if err != nil {
-		return nil, []string{"目标必须是公网 IPv4 地址"}
+		return nil, []string{"无法解析目标 IP 地址"}
 	}
-	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	network, bind, protocol := "ip4:icmp", "0.0.0.0", 1
+	var requestType, replyType icmp.Type = ipv4.ICMPTypeEcho, ipv4.ICMPTypeEchoReply
+	if target.Is6() {
+		network, bind, protocol = "ip6:ipv6-icmp", "::", 58
+		requestType, replyType = ipv6.ICMPTypeEchoRequest, ipv6.ICMPTypeEchoReply
+	}
+	conn, err := icmp.ListenPacket(network, bind)
 	if err != nil {
 		return nil, []string{"当前环境不允许执行 ICMP 延迟测试"}
 	}
@@ -255,7 +273,7 @@ func icmpProbeSamplesContext(ctx context.Context, host string, _ int, count int,
 			break
 		}
 		sequence := int(latencyProbeSequence.Add(1) & 0xffff)
-		message := icmp.Message{Type: ipv4.ICMPTypeEcho, Code: 0, Body: &icmp.Echo{ID: id, Seq: sequence, Data: []byte("oboard-latency")}}
+		message := icmp.Message{Type: requestType, Code: 0, Body: &icmp.Echo{ID: id, Seq: sequence, Data: []byte("oboard-latency")}}
 		payload, marshalErr := message.Marshal(nil)
 		if marshalErr != nil {
 			failures = append(failures, "无法创建 ICMP 测试请求")
@@ -270,7 +288,7 @@ func icmpProbeSamplesContext(ctx context.Context, host string, _ int, count int,
 			failures = append(failures, "无法设置 ICMP 测试超时")
 			continue
 		}
-		if _, err := conn.WriteTo(payload, &net.IPAddr{IP: net.IP(target.AsSlice())}); err != nil {
+		if _, err := conn.WriteTo(payload, &net.IPAddr{IP: net.IP(target.AsSlice()), Zone: target.Zone()}); err != nil {
 			failures = append(failures, "无法发送 ICMP 测试请求")
 			continue
 		}
@@ -289,8 +307,8 @@ func icmpProbeSamplesContext(ctx context.Context, host string, _ int, count int,
 			if !icmpPeerMatches(peer, net.IP(target.AsSlice())) {
 				continue
 			}
-			reply, parseErr := icmp.ParseMessage(1, buffer[:n])
-			if parseErr != nil || reply.Type != ipv4.ICMPTypeEchoReply {
+			reply, parseErr := icmp.ParseMessage(protocol, buffer[:n])
+			if parseErr != nil || reply.Type != replyType {
 				continue
 			}
 			echo, ok := reply.Body.(*icmp.Echo)
@@ -323,9 +341,9 @@ func tcpProbeSamplesContext(ctx context.Context, host string, port, count int, i
 	if port < 1 || port > 65535 {
 		return nil, []string{"TCP 延迟目标端口无效"}
 	}
-	targetIP, err := resolveLatencyProbeIPv4(ctx, host)
+	targetIP, err := resolveLatencyProbeIP(ctx, host)
 	if err != nil {
-		return nil, []string{"目标必须解析到公网 IPv4 地址"}
+		return nil, []string{"无法解析目标 IP 地址"}
 	}
 	latencies := make([]int64, 0, count)
 	failures := make([]string, 0, count)
@@ -333,7 +351,7 @@ func tcpProbeSamplesContext(ctx context.Context, host string, port, count int, i
 	address := net.JoinHostPort(targetIP.String(), fmt.Sprintf("%d", port))
 	for index := 0; index < count; index++ {
 		started := time.Now()
-		conn, err := dialer.DialContext(ctx, "tcp4", address)
+		conn, err := dialer.DialContext(ctx, "tcp", address)
 		if err != nil {
 			if ctx.Err() != nil {
 				failures = append(failures, "测试已取消")
@@ -362,24 +380,19 @@ func tcpProbeSamplesContext(ctx context.Context, host string, port, count int, i
 	return latencies, failures
 }
 
-func resolveLatencyProbeIPv4(ctx context.Context, host string) (netip.Addr, error) {
+func resolveLatencyProbeIP(ctx context.Context, host string) (netip.Addr, error) {
 	host = strings.TrimSpace(host)
 	if addr, err := netip.ParseAddr(host); err == nil {
-		if validLatencyProbeIPv4(addr) {
-			return addr, nil
-		}
-		return netip.Addr{}, errors.New("not a public IPv4 address")
+		return addr.Unmap(), nil
 	}
-	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 	if err != nil {
 		return netip.Addr{}, err
 	}
-	for _, addr := range addresses {
-		if validLatencyProbeIPv4(addr) {
-			return addr, nil
-		}
+	if len(addresses) > 0 {
+		return addresses[0].Unmap(), nil
 	}
-	return netip.Addr{}, errors.New("hostname has no public IPv4 address")
+	return netip.Addr{}, errors.New("hostname has no IP address")
 }
 
 func newLatencyProbeReportID(agentID string, checkedAt time.Time) string {
@@ -723,11 +736,11 @@ func networkProbeHTTPClient(timeout time.Duration, now func() time.Time) *http.C
 			if err != nil {
 				return nil, err
 			}
-			target, err := resolveLatencyProbeIPv4(ctx, host)
+			target, err := resolveLatencyProbeIP(ctx, host)
 			if err != nil {
 				return nil, err
 			}
-			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp4", net.JoinHostPort(target.String(), port))
+			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", net.JoinHostPort(target.String(), port))
 		},
 		TLSHandshakeTimeout:    timeout,
 		ResponseHeaderTimeout:  timeout,

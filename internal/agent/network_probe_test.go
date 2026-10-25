@@ -3,9 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"net/netip"
 	"strconv"
 	"testing"
 	"time"
@@ -99,7 +100,25 @@ func TestNetworkProbeHTTPStatusRedirectAndCancellation(t *testing.T) {
 	}
 }
 
-func TestNetworkProbeHTTPBlocksPrivateDialAndProxy(t *testing.T) {
+func TestNetworkProbeInternalTargets(t *testing.T) {
+	for _, host := range []string{"localhost", "router", "router.lan", "127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fd00::1", "fe80::1%eth0"} {
+		target := model.LatencyProbeTarget{ProbeID: "custom", Kind: "custom", Host: host, Port: 80}
+		if addr, err := netip.ParseAddr(host); err == nil {
+			target.IP = addr.String()
+			resolved, err := resolveLatencyProbeIP(context.Background(), host)
+			if err != nil || resolved != addr {
+				t.Fatalf("resolve %s: %s %v", host, resolved, err)
+			}
+		}
+		for _, mode := range []model.LatencyProbeMode{model.LatencyProbeModeTCP, model.LatencyProbeModeICMP} {
+			if err := validateLatencyProbeTarget(target, mode); err != nil {
+				t.Fatalf("validate %s %s: %v", mode, host, err)
+			}
+		}
+	}
+}
+
+func TestNetworkProbeHTTPInternalTargetsAndProxy(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 	now := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
 	client := networkProbeHTTPClient(time.Second, func() time.Time { return now })
@@ -108,18 +127,35 @@ func TestNetworkProbeHTTPBlocksPrivateDialAndProxy(t *testing.T) {
 	if transport.Proxy != nil || !transport.TLSClientConfig.Time().Equal(now) {
 		t.Fatal("HTTP transport inherited a proxy or ignored logical time")
 	}
-	for _, address := range []string{"127.0.0.1:80", "10.0.0.1:80", "169.254.169.254:80", "[::1]:80"} {
-		if conn, err := transport.DialContext(context.Background(), "tcp", address); err == nil {
-			conn.Close()
-			t.Fatalf("dialed private destination %s", address)
-		}
-	}
-	request := &http.Request{URL: &url.URL{Scheme: "http", Host: "127.0.0.1"}}
-	// Redirects use the same restricted transport; they cannot bypass the public-IP gate.
-	if err := client.CheckRedirect(request, []*http.Request{{}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Get(request.URL.String()); err == nil {
-		t.Fatal("private redirect destination accepted")
+	for _, network := range []string{"tcp4", "tcp6"} {
+		t.Run(network, func(t *testing.T) {
+			address := "127.0.0.1:0"
+			if network == "tcp6" {
+				address = "[::1]:0"
+			}
+			listener, err := net.Listen(network, address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/redirect" {
+					http.Redirect(w, r, "/health", http.StatusFound)
+				}
+			}))
+			server.Listener.Close()
+			server.Listener = listener
+			server.Start()
+			defer server.Close()
+			samples, failures := httpProbeSamplesWithClient(context.Background(), server.URL+"/redirect", 1, 0, client)
+			if len(samples) != 1 || len(failures) != 0 {
+				t.Fatalf("HTTP internal probe: %v %v", samples, failures)
+			}
+			host, portText, _ := net.SplitHostPort(listener.Addr().String())
+			port, _ := strconv.Atoi(portText)
+			samples, failures = tcpProbeSamplesContext(context.Background(), host, port, 1, 0, time.Second)
+			if len(samples) != 1 || len(failures) != 0 {
+				t.Fatalf("TCP internal probe: %v %v", samples, failures)
+			}
+		})
 	}
 }
