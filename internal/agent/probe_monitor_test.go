@@ -52,3 +52,23 @@ func TestGoogleRegionProbeRequiresMonitorOrigin(t *testing.T) {
 		t.Fatal("Google region probe is not routed as a diagnostic")
 	}
 }
+
+func TestMonitorTCPProbeSkipsPluginGate(t *testing.T) {
+	runner := diagnosticRunner(t, false)
+	payload := model.NetworkTCPProbeTaskPayload{NetworkDiagnosticEnvelope: model.NetworkDiagnosticEnvelope{ProtocolVersion: model.NetworkDiagnosticProtocolVersion, Origin: model.NetworkDiagnosticOriginMonitor, OperationID: "monitor-tcp", IssuedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute)}, Host: "127.0.0.1", Port: 1, IPFamily: model.NetworkFamilyAuto, TimeoutMS: 500}
+	raw, _ := json.Marshal(payload)
+	status, result := runner.executeNetworkDiagnosticTask(model.AgentTask{Type: model.AgentTaskTypeNetworkTCP, PayloadJSON: string(raw)})
+	code := diagnosticCode(t, status, result)
+	if code == model.NetworkDiagnosticCodeLocalGateDenied {
+		t.Fatal("monitor TCP probe was blocked by the plugin gate")
+	}
+	if code != model.NetworkDiagnosticCodeTargetNotAllowed {
+		t.Fatalf("loopback target code = %s, want the public-target rejection (%s)", code, result)
+	}
+	payload.PluginID = "plugin"
+	raw, _ = json.Marshal(payload)
+	status, result = runner.executeNetworkDiagnosticTask(model.AgentTask{Type: model.AgentTaskTypeNetworkTCP, PayloadJSON: string(raw)})
+	if diagnosticCode(t, status, result) != model.NetworkDiagnosticCodeInvalidInput {
+		t.Fatal("monitor TCP probe with plugin identity accepted")
+	}
+}

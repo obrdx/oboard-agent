@@ -86,8 +86,8 @@ func (r *Runner) diagnosticNow() time.Time {
 func (r *Runner) executeNetworkDiagnosticTask(task model.AgentTask) (string, string) {
 	var envelope model.NetworkDiagnosticEnvelope
 	decoded := json.Unmarshal([]byte(task.PayloadJSON), &envelope) == nil
-	if decoded && envelope.Origin == model.NetworkDiagnosticOriginMonitor && task.Type != model.AgentTaskTypeNetworkTrace && task.Type != model.AgentTaskTypeGoogleRegion {
-		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "monitor origin is restricted to route traces and Google region probes")
+	if decoded && envelope.Origin == model.NetworkDiagnosticOriginMonitor && task.Type != model.AgentTaskTypeNetworkTrace && task.Type != model.AgentTaskTypeGoogleRegion && task.Type != model.AgentTaskTypeNetworkTCP {
+		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "monitor origin is restricted to route traces, TCP probes and Google region probes")
 	}
 	if task.Type == model.AgentTaskTypeGoogleRegion && (!decoded || envelope.Origin != model.NetworkDiagnosticOriginMonitor) {
 		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "Google region probes require the monitor origin")

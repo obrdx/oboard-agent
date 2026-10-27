@@ -15,7 +15,7 @@ import (
 )
 
 func TestSupportedProtocolsRemainMinimal(t *testing.T) {
-	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix", "family-selector", "user-selector", "vpngate-pool"}
+	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "http", "wireguard", "source-prefix", "family-selector", "user-selector", "vpngate-pool"}
 	if !slices.Equal(SupportedProtocols, want) {
 		t.Fatalf("supported protocols = %v, want %v", SupportedProtocols, want)
 	}
@@ -42,6 +42,26 @@ func TestLoadConfigRejectsExcludedProtocols(t *testing.T) {
 				t.Fatal("excluded protocol config was accepted")
 			}
 		})
+	}
+}
+
+func TestLoadConfigAcceptsHTTPOutbound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{
+		"outbounds":[
+			{"type":"http","tag":"http-plain","server":"127.0.0.1","server_port":8080,"username":"u","password":"p"},
+			{"type":"http","tag":"http-tls","server":"127.0.0.1","server_port":8443,"tls":{"enabled":true,"server_name":"proxy.example.com"}}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.Outbounds) != 2 || opts.Outbounds[0].Type != "http" || opts.Outbounds[1].Type != "http" {
+		t.Fatalf("http outbounds not loaded: %#v", opts.Outbounds)
 	}
 }
 
