@@ -373,6 +373,32 @@ func cpuUsageBetween(previous, current procCPU) (float64, bool) {
 
 type procCPU struct{ idle, total uint64 }
 
+// hostUptimeSeconds reports how long the host has run since its last boot.
+// It is a monotonic duration, so a skewed or corrected wall clock never moves
+// the boot time Controller derives from it. Zero means unknown.
+func hostUptimeSeconds() uint64 {
+	if runtime.GOOS != "linux" {
+		return platformHostUptimeSeconds()
+	}
+	b, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+	return parseProcUptime(string(b))
+}
+
+func parseProcUptime(content string) uint64 {
+	fields := strings.Fields(content)
+	if len(fields) == 0 {
+		return 0
+	}
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || seconds < 1 || seconds > float64(1<<40) {
+		return 0
+	}
+	return uint64(seconds)
+}
+
 func readProcStatCPU() (procCPU, bool) {
 	b, err := os.ReadFile("/proc/stat")
 	if err != nil {

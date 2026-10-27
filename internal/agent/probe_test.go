@@ -449,3 +449,17 @@ func TestTaskResultHealthDoesNotWaitForProbe(t *testing.T) {
 		t.Fatal("task result blocked behind health probe")
 	}
 }
+
+func TestParseProcUptime(t *testing.T) {
+	cases := map[string]uint64{
+		"350735.47 234388.90\n": 350735,
+		"0.42 0.10":             0,
+		"":                      0,
+		"garbage 1":             0,
+	}
+	for input, want := range cases {
+		if got := parseProcUptime(input); got != want {
+			t.Fatalf("parseProcUptime(%q) = %d, want %d", input, got, want)
+		}
+	}
+}

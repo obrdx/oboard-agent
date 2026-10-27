@@ -62,3 +62,6 @@ func samplePlatformSystemProbe(p systemProbe, _ procCPU) (systemProbe, procCPU) 
 	p.MemoryUsedBytes = mem.Sys
 	return p, procCPU{}
 }
+
+// Only Linux exposes /proc/uptime; other Unix builds report it as unknown.
+func platformHostUptimeSeconds() uint64 { return 0 }

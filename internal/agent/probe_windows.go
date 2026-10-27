@@ -266,3 +266,7 @@ func platformKernelVersion() string {
 	version := windows.RtlGetVersion()
 	return fmt.Sprintf("windows-nt-%d.%d.%d", version.MajorVersion, version.MinorVersion, version.BuildNumber)
 }
+
+func platformHostUptimeSeconds() uint64 {
+	return uint64(windows.DurationSinceBoot() / time.Second)
+}

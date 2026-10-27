@@ -91,6 +91,7 @@ Request:
     "kernel": "6.1.0",
     "cpu": "Intel(R) Xeon",
     "cpu_cores": 4,
+    "host_uptime_seconds": 350735,
     "cpu_usage_percent": 1.4,
     "memory_used_bytes": 134217728,
     "memory_total_bytes": 536870912,
@@ -388,6 +389,8 @@ to one multi-server deployment carry the same allocated version.
 Health reports are best-effort. `region_code` is the upper-case two-letter region detected from the Agent's own exit network and is refreshed with the public-IP probe. `public_ipv4`/`public_ipv6` come from outbound probes of the Agent's exit network. `interface_ipv6` is a local, network-free scan of global IPv6 addresses assigned to interfaces; it reports inbound IPv6 capability for hosts whose IPv6 is inbound-only, and Controller uses it for listener binding and as the IPv6 entry-address fallback only (never for egress IP-stack decisions). `kernel_capabilities` is the sorted, unique, bounded capability list parsed from `oboard-sb version` JSON (at most 64 entries and 128 bytes per entry); Controller stores it as runtime metadata and refuses desired state requiring an absent capability rather than sending unsupported kernel JSON. `applied_config_version` and `applied_config_digest` are local persistent version metadata only; they never contain configuration, credentials, or task payloads. Controller uses them to detect local drift or a lost task notification. Missing optional fields must not fail enrollment or heartbeat handling.
 
 `cpu` is the host CPU model string from `/proc/cpuinfo` (`model name` or `Hardware`). `cpu_cores` is the logical CPU count from `processor` lines, with `runtime.NumCPU()` as fallback. The two fields are independent: never parse a core count out of the model name. Omitting `cpu_cores` or sending `0` keeps the last known Controller value.
+
+`host_uptime_seconds` is the time since the host last booted (`/proc/uptime` on Linux, `DurationSinceBoot` on Windows; omitted elsewhere). It is a monotonic duration, so Controller derives `host_booted_at` on its own clock and a skewed or corrected node clock never moves it. Controller keeps the previous boot time while the derived value stays within two minutes, so report latency does not churn it, and resets it after a reboot. Omitting it or sending `0` keeps the last known value.
 
 `metric_report` carries historical resource samples only and never updates live
 server state, `last_seen_at`, traffic baselines, or SLA state:

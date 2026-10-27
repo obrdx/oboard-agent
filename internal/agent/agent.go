@@ -3697,6 +3697,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		Kernel:             host.Kernel,
 		CPU:                firstNonEmpty(probe.CPUName, host.CPUName, runtime.GOARCH),
 		CPUCores:           host.CPUCores,
+		HostUptimeSeconds:  hostUptimeSeconds(),
 		MemoryBytes:        probe.MemoryUsedBytes,
 		CPUUsagePercent:    probe.CPUUsagePercent,
 		MemoryUsedBytes:    probe.MemoryUsedBytes,
