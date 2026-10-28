@@ -1109,7 +1109,14 @@ type VPNGatePoolStatus struct {
 	Members       []VPNGateMemberStatus `json:"members"`
 }
 
+type ExternalOutboundProbe struct {
+	ExternalOutboundID int64           `json:"external_outbound_id"`
+	Fingerprint        string          `json:"fingerprint"`
+	Outbound           json.RawMessage `json:"outbound"`
+}
+
 type ExternalEgressProbePlan struct {
+	Standalone            *ExternalOutboundProbe      `json:"standalone,omitempty"`
 	Version               int64                       `json:"version"`
 	ExpectedConfigVersion int64                       `json:"expected_config_version,omitempty"`
 	TimeoutMS             int                         `json:"timeout_ms"`

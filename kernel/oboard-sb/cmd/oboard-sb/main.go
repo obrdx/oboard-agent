@@ -30,7 +30,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{proxydscp.Capability, "runtime_security_v1", "authorization_lease_v1", "offline_service_v1", "authorization_control_v1", "runtime_users_v1", "runtime_users:vless", "runtime_users:hysteria2", "runtime_users:shadowsocks-multi", "runtime_users:snell-psk", "snell_multi_psk_v4_v1", "snell_multi_psk_v6_v1", "runtime_users_snell_psk_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1", "dns_doq_v1", "dns_group_v1", "account_activity_local_v1", "openvpn_outbound_v1", "vpngate_pool_v1", "http_outbound_v1"}
+var kernelCapabilities = []string{proxydscp.Capability, "runtime_security_v1", "authorization_lease_v1", "offline_service_v1", "authorization_control_v1", "runtime_users_v1", "runtime_users:vless", "runtime_users:hysteria2", "runtime_users:shadowsocks-multi", "runtime_users:snell-psk", "snell_multi_psk_v4_v1", "snell_multi_psk_v6_v1", "runtime_users_snell_psk_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1", "dns_doq_v1", "dns_group_v1", "account_activity_local_v1", "openvpn_outbound_v1", "vpngate_pool_v1", "http_outbound_v1", "external_outbound_probe_v1"}
 
 // runtimeConfigState is the payload-free identity of the configuration this
 // process actually loaded. Agent compares it with the desired configuration so
@@ -238,6 +238,9 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 	}
 	registerRuntimeStatusHandler(mux, runtimeConfig)
 	registerOutboundEgressHandler(mux, instance)
+	if strings.HasPrefix(listen, "unix:") {
+		mux.Handle("/outbounds/check", newStandaloneOutboundCheckHandler(runtimeClock))
+	}
 	registerOutboundRelayHandlers(mux, listen, instance)
 	registerRouteRelayHandlers(mux, listen, instance)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprintln(w, "ok") })

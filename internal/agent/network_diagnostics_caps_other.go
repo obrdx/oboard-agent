@@ -9,6 +9,7 @@ import "github.com/OboardProject/oboard-agent/internal/model"
 // platforms report them as unsupported rather than falling back to programs.
 func networkDiagnosticCapabilities() []string {
 	return []string{
+		"external_outbound_check_v1",
 		model.AgentCapabilityGoogleRegionProbe, model.AgentCapabilityNetworkTCPMonitor, model.AgentCapabilityNetworkDiagnostics, model.AgentCapabilityNetworkTCPProbe,
 		model.AgentCapabilityNetworkDNSLookup, model.AgentCapabilityNetworkHTTPProbe,
 	}

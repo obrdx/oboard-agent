@@ -24,6 +24,9 @@ const (
 )
 
 func (r *Runner) runExternalEgressProbeTask(ctx context.Context, plan model.ExternalEgressProbePlan) (model.ExternalEgressProbeResult, error) {
+	if plan.Standalone != nil {
+		return r.runStandaloneExternalProbe(ctx, plan)
+	}
 	result := model.ExternalEgressProbeResult{Items: make([]model.ExternalEgressProbeItem, len(plan.Targets))}
 	if len(plan.Targets) == 0 {
 		return result, errors.New("external egress probe has no targets")
@@ -159,4 +162,49 @@ func boundedExternalEgressProbeError(message string) string {
 		message = message[:512]
 	}
 	return message
+}
+
+func (r *Runner) runStandaloneExternalProbe(ctx context.Context, plan model.ExternalEgressProbePlan) (model.ExternalEgressProbeResult, error) {
+	probe := plan.Standalone
+	result := model.ExternalEgressProbeResult{}
+	if probe == nil || probe.ExternalOutboundID <= 0 || len(probe.Fingerprint) != 64 || len(probe.Outbound) == 0 || len(probe.Outbound) > 65536 || len(plan.Targets) != 0 {
+		return result, errors.New("invalid standalone probe")
+	}
+	item := model.ExternalEgressProbeItem{ProbeID: probe.Fingerprint, Status: "failed"}
+	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://oboard-sb/outbounds/check", bytes.NewReader(probe.Outbound))
+	if err != nil {
+		return result, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := r.coreClient
+	if client == nil {
+		client = unixHTTPClient(r.coreAPISocketPath())
+	}
+	response, err := client.Do(req)
+	if err == nil {
+		defer response.Body.Close()
+		if response.StatusCode == http.StatusOK {
+			var body struct {
+				ExitIP string `json:"exit_ip"`
+			}
+			err = json.NewDecoder(io.LimitReader(response.Body, 1024)).Decode(&body)
+			if err == nil {
+				addr, parseErr := netip.ParseAddr(body.ExitIP)
+				if parseErr != nil {
+					err = errors.New("invalid proxy exit IP")
+				} else {
+					item.Status, item.ExitIP = "succeeded", addr.Unmap().String()
+				}
+			}
+		} else {
+			err = errors.New("proxy authentication or exit request failed")
+		}
+	}
+	if err != nil {
+		item.Error = "代理连接或出口查询失败，请检查地址、凭证及 TLS 设置"
+	}
+	result.Items = []model.ExternalEgressProbeItem{item}
+	return result, err
 }

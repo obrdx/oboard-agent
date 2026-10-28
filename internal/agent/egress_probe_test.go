@@ -110,3 +110,35 @@ func TestExternalEgressProbeLimitsCoreRequestsToFourConcurrent(t *testing.T) {
 		}
 	}
 }
+
+func TestStandaloneExternalProbeNeedsNoDeployedConfig(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), ResourceProfile: "large"})
+	calls := 0
+	runner.coreClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if request.URL.Path != "/outbounds/check" {
+			t.Fatalf("wrong kernel path: %s", request.URL.Path)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"exit_ip":"8.8.8.8"}`)), Header: make(http.Header)}, nil
+	})}
+	plan := model.ExternalEgressProbePlan{Standalone: &model.ExternalOutboundProbe{ExternalOutboundID: 2, Fingerprint: strings.Repeat("a", 64), Outbound: []byte(`{"type":"http","tag":"external-probe","server":"1.1.1.1","server_port":8080}`)}}
+	result, err := runner.runExternalEgressProbeTask(context.Background(), plan)
+	if err != nil || len(result.Items) != 1 || result.Items[0].ExitIP != "8.8.8.8" || calls != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	plan.Targets = []model.ExternalEgressProbeTarget{externalEgressAgentTarget(0)}
+	if _, err := runner.runExternalEgressProbeTask(context.Background(), plan); err == nil || calls != 1 {
+		t.Fatal("mixed standalone/path probe accepted")
+	}
+}
+
+func TestStandaloneExternalProbeDoesNotExposeProxyErrors(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), ResourceProfile: "large"})
+	runner.coreClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 502, Body: io.NopCloser(strings.NewReader("password=private-secret")), Header: make(http.Header)}, nil
+	})}
+	result, err := runner.runExternalEgressProbeTask(context.Background(), model.ExternalEgressProbePlan{Standalone: &model.ExternalOutboundProbe{ExternalOutboundID: 1, Fingerprint: strings.Repeat("b", 64), Outbound: []byte(`{}`)}})
+	if err == nil || len(result.Items) != 1 || result.Items[0].Status != "failed" || strings.Contains(result.Items[0].Error, "private-secret") {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}

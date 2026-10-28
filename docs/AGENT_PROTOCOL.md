@@ -1106,7 +1106,11 @@ For TCP Ping, the public target uses port 443 and regional targets use port 80.
 For ICMP Ping, every target uses port 0 in both plan and report. Agent accepts
 only the allowlisted public hostnames and regional targets that are either a
 literal public IPv4 or a DNS hostname. Hostname regional targets omit `ip` in
-the signed plan; Agent resolves them to a public IPv4 at probe time. It
+the signed plan. Custom task targets accept IPv4, IPv6 and internal hostnames,
+including private, loopback and link-local destinations. Agent resolves DNS at
+probe time; TCP, HTTP and ICMP use the resolved address family. HTTP redirects
+follow the same destination policy (at most three hops). Plugin diagnostics
+retain their separate public-target restrictions. Agent
 runs at most 16 targets concurrently, performs 1 to 10 samples, and caps the
 whole batch at 90 seconds. One unreachable target does not discard other
 results.
