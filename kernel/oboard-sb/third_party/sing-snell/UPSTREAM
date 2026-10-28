@@ -7,7 +7,8 @@ Selected upstream files: recursive *.go, go.mod, go.sum, LICENSE.
 Local patch: scripts/patches/sing-snell.patch, applied by scripts/sync-sing-snell.sh.
 The patch adds bounded multi-PSK recognition for v5/v6, connection-bound response
 keys, admission callbacks on native reuse, shared authentication budgets and
-replay state, bounded HTTP obfuscation parsing, and protocol verification tests.
+replay state, bounded HTTP obfuscation parsing, and protocol verification tests,
+including the v6 first-record shape vectors the OBoard Controller copy must match.
 It also exports ContextWithKeepSession for the sing-box urltest import. The local
 reuse path does not read that flag.
 The original single-PSK and userkey services retain their distinct semantics.
