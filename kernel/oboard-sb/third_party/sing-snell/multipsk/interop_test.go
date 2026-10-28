@@ -15,6 +15,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -221,6 +222,52 @@ func TestZeroUsersAndDuplicateAreFailClosed(t *testing.T) {
 			}
 			if e := s.UpdatePSKs([]multipsk.User{good}); e != nil {
 				t.Fatal(e)
+			}
+		})
+	}
+}
+
+func TestV6LongRequestPSKService(t *testing.T) {
+	domain := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)
+	for _, mode := range []snellv6.Mode{snellv6.ModeDefault, snellv6.ModeUnshaped} {
+		t.Run(mode.String(), func(t *testing.T) {
+			s, h := fixture(t, 6, mode, 0)
+			u := multipsk.User{Name: "long-request", PSK: []byte("audit-snell-v6-psk-0")}
+			if err := s.UpdatePSKs([]multipsk.User{u}); err != nil {
+				t.Fatal(err)
+			}
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+			done := make(chan error, 1)
+			go func() {
+				err := s.NewConnection(context.Background(), server, M.ParseSocksaddr("192.0.2.1:1234"), nil)
+				if err != nil {
+					server.Close()
+				}
+				done <- err
+			}()
+			c := method(t, 6, mode, 0, string(u.PSK), strings.Repeat("x", 255)).DialEarlyConn(client, M.ParseSocksaddr(domain+":443"))
+			if _, err := c.Write([]byte("payload")); err != nil {
+				t.Fatal(err)
+			}
+			out := make([]byte, 7)
+			if _, err := io.ReadFull(c, out); err != nil || string(out) != "payload" {
+				t.Fatalf("payload=%q err=%v", out, err)
+			}
+			if got := <-h.users; got != u.Name {
+				t.Fatalf("identity=%q", got)
+			}
+			c.Close()
+			server.Close()
+			select {
+			case err := <-done:
+				if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("session leaked")
 			}
 		})
 	}

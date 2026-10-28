@@ -113,7 +113,7 @@ func (s *MultiService[U]) authenticate(ctx context.Context, request snell.Reques
 	return auth.ContextWithUser(ctx, user), nil
 }
 
-func (s *Service) readRequest(record *buf.Buffer) (snell.Request, error) {
+func (s *Service) readRequest(record io.Reader) (snell.Request, error) {
 	prefix := make([]byte, 3)
 	_, err := io.ReadFull(record, prefix)
 	if err != nil {
@@ -149,12 +149,47 @@ func (s *Service) readRequest(record *buf.Buffer) (snell.Request, error) {
 	return request, nil
 }
 
+// Request fields are length-prefixed and bounded to 516 bytes. Keep the
+// unconsumed bytes of the final record as application payload.
+func (s *Service) readRequestRecords(reader reuse.RecordReader, record *buf.Buffer) (snell.Request, *buf.Buffer, error) {
+	if record.IsEmpty() {
+		return snell.Request{}, record, io.ErrUnexpectedEOF
+	}
+	r := &requestRecordReader{reader: reader, record: record}
+	request, err := s.readRequest(r)
+	return request, r.record, err
+}
+
+type requestRecordReader struct {
+	reader reuse.RecordReader
+	record *buf.Buffer
+}
+
+func (r *requestRecordReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.record.IsEmpty() {
+		next, err := r.reader.ReadRecord()
+		if err != nil {
+			return 0, err
+		}
+		if next.IsEmpty() {
+			next.Release()
+			return 0, io.ErrUnexpectedEOF
+		}
+		r.record.Release()
+		r.record = next
+	}
+	return r.record.Read(p)
+}
+
 func (s *Service) newConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
 	reader, record, err := readFirstRecord(conn, s.mode, s.psk, s.profile, N.ReadWaitOptions{})
 	if err != nil {
 		return E.Cause(err, "read request")
 	}
-	request, err := s.readRequest(record)
+	request, record, err := s.readRequestRecords(reader, record)
 	if err != nil {
 		record.Release()
 		return E.Cause(err, "decode request")
@@ -218,7 +253,7 @@ func (s *MultiService[U]) newConnection(ctx context.Context, conn net.Conn, sour
 	if err != nil {
 		return E.Cause(err, "read request")
 	}
-	request, err := s.readRequest(record)
+	request, record, err := s.readRequestRecords(reader, record)
 	if err != nil {
 		record.Release()
 		return E.Cause(err, "decode request")

@@ -126,7 +126,7 @@ func (s *PSKService) NewConnection(ctx context.Context, conn net.Conn, source M.
 		return err
 	}
 	bound := &Service{psk: matched.PSK, mode: s.mode, profile: profile, handler: s.handler}
-	request, err := bound.readRequest(record)
+	request, record, err := bound.readRequestRecords(r, record)
 	if err != nil {
 		record.Release()
 		return err
