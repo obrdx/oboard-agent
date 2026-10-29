@@ -923,6 +923,11 @@ Task result shape:
 
 ### `probe_external_egress`
 
+Node management availability/region checks now run on the Controller host using
+`oboard-sb -check-outbound`; they do not issue this Agent task. The explicit
+deployed-path diagnostic remains on the signed Agent lane.
+
+
 This standalone task and the optional deployment step `external_egress_probe`
 share `ExternalEgressProbePlan`:
 

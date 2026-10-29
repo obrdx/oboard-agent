@@ -51,6 +51,7 @@ func main() {
 	log.SetOutput(redact.Writer{Output: log.Writer()})
 	config := flag.String("config", "config.json", "sing-box config path")
 	keyPath := flag.String("key", "", "optional stealth key file; decrypts the configuration and sibling state files")
+	outboundCheck := flag.Bool("check-outbound", false, "check one outbound JSON from stdin and print its public exit IP")
 	check := flag.Bool("check", false, "validate config and exit")
 	operationalDigest := flag.Bool("operational-digest", false, "print the operational configuration digest for the config file and exit")
 	api := flag.String("api", "", "optional local health API listen address; supports unix:/path.sock")
@@ -67,6 +68,12 @@ func main() {
 	flag.Parse()
 	runtimeguard.SetLocalAPI(*api)
 
+	if *outboundCheck {
+		if err := runStandaloneOutboundCheck(os.Stdin, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *securityCheck {
 		if err := runtimeguard.Apply("enhanced"); err != nil {
 			log.Fatal("runtime security profile unsupported")

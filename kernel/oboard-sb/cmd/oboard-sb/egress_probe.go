@@ -189,45 +189,58 @@ func newStandaloneOutboundCheckHandler(clock *minibox.RuntimeClock) http.Handler
 			http.Error(w, "invalid probe outbound", 400)
 			return
 		}
-		host := outbound["server"].(string)
-		addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if err != nil || len(addresses) == 0 {
-			http.Error(w, "proxy address lookup failed", 400)
-			return
-		}
-		for _, address := range addresses {
-			if !isPublicOutboundEgressAddr(address.Unmap()) {
-				http.Error(w, "proxy address must be public", 400)
-				return
-			}
-		}
-		// Pin the validated address so the isolated adapter cannot resolve it again.
-		sort.SliceStable(addresses, func(i, j int) bool { return addresses[i].Unmap().Is4() && !addresses[j].Unmap().Is4() })
-		outbound["server"] = addresses[0].Unmap().String()
-		if tls, ok := outbound["tls"].(map[string]any); ok && tls["enabled"] == true && (tls["server_name"] == nil || tls["server_name"] == "") {
-			tls["server_name"] = host
-		}
-		var exitIP string
-		for i, address := range addresses {
-			if i >= 2 {
-				break
-			}
-			outbound["server"] = address.Unmap().String()
-			attempt, cancelAttempt := context.WithTimeout(ctx, 5*time.Second)
-			exitIP, err = probeStandaloneOutbound(attempt, outbound, outboundEgressSources, clock)
-			cancelAttempt()
-			if err == nil {
-				break
-			}
-		}
+		exitIP, err := checkStandaloneOutbound(ctx, outbound, clock)
 		if err != nil {
-			http.Error(w, "proxy authentication or exit request failed", http.StatusBadGateway)
+			status := http.StatusBadGateway
+			if errors.Is(err, errProbeAddress) {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"exit_ip": exitIP})
 	})
+}
+
+var errProbeAddress = errors.New("proxy address lookup failed or address is not public")
+
+func checkStandaloneOutbound(ctx context.Context, outbound map[string]any, clock *minibox.RuntimeClock) (string, error) {
+	host := outbound["server"].(string)
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil || len(addresses) == 0 {
+		return "", errProbeAddress
+	}
+	for _, address := range addresses {
+		if !isPublicOutboundEgressAddr(address.Unmap()) {
+			return "", errProbeAddress
+		}
+	}
+	// Pin the validated address so the isolated adapter cannot resolve it again.
+	sort.SliceStable(addresses, func(i, j int) bool { return addresses[i].Unmap().Is4() && !addresses[j].Unmap().Is4() })
+	outbound["server"] = addresses[0].Unmap().String()
+	if tls, ok := outbound["tls"].(map[string]any); ok && tls["enabled"] == true && (tls["server_name"] == nil || tls["server_name"] == "") {
+		tls["server_name"] = host
+	}
+	var exitIP string
+	for i, address := range addresses {
+		if i >= 2 {
+			break
+		}
+		outbound["server"] = address.Unmap().String()
+		attempt, cancelAttempt := context.WithTimeout(ctx, 5*time.Second)
+		exitIP, err = probeStandaloneOutbound(attempt, outbound, outboundEgressSources, clock)
+		cancelAttempt()
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return "", errors.New("proxy authentication or exit request failed")
+	}
+
+	return exitIP, nil
 }
 
 func probeStandaloneOutbound(ctx context.Context, outbound map[string]any, sources []string, clock *minibox.RuntimeClock) (string, error) {
@@ -290,4 +303,19 @@ func probeContainsFileReference(value any) bool {
 		}
 	}
 	return false
+}
+
+func runStandaloneOutboundCheck(input io.Reader, output io.Writer) error {
+	raw, err := io.ReadAll(io.LimitReader(input, 65537))
+	var outbound map[string]any
+	if err != nil || len(raw) > 65536 || json.Unmarshal(raw, &outbound) != nil || !standaloneOutboundAllowed(outbound) {
+		return errors.New("invalid probe outbound")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	exitIP, err := checkStandaloneOutbound(ctx, outbound, minibox.NewRuntimeClock())
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(map[string]string{"exit_ip": exitIP})
 }

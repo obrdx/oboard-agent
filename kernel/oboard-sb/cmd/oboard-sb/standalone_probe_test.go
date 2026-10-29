@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"io"
@@ -70,6 +71,21 @@ func TestStandaloneProbeRefusesPrivateAndUnsafeOutbounds(t *testing.T) {
 		newStandaloneOutboundCheckHandler(minibox.NewRuntimeClock()).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/outbounds/check", strings.NewReader(raw)))
 		if recorder.Code != 400 {
 			t.Fatalf("unsafe probe accepted: status=%d", recorder.Code)
+		}
+	}
+}
+
+func TestStandaloneProbeCommandRejectsUnsafeInput(t *testing.T) {
+	for _, raw := range []string{
+		`{}`, strings.Repeat(" ", 65537),
+		`{"type":"http","tag":"external-probe","server":"127.0.0.1","server_port":8080,"password":"must-not-leak"}`,
+		`{"type":"http","tag":"external-probe","server":"1.1.1.1","server_port":8080,"detour":"direct"}`,
+		`{"type":"http","tag":"external-probe","server":"1.1.1.1","server_port":8080} {}`,
+	} {
+		var output bytes.Buffer
+		err := runStandaloneOutboundCheck(strings.NewReader(raw), &output)
+		if err == nil || output.Len() != 0 || strings.Contains(err.Error(), "must-not-leak") {
+			t.Fatalf("unsafe command: %v %q", err, output.String())
 		}
 	}
 }
