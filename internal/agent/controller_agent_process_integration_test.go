@@ -77,7 +77,7 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 	linkAddress := "127.0.0.1:" + strconv.Itoa(processTestPort(t))
 	processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/settings", token, map[string]any{"stealth_transport": map[string]any{"enabled": true, "listen_address": linkAddress, "public_address": linkAddress}}, http.StatusOK)
 	created := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/servers", token, map[string]any{
-		"name": "process-node", "renewal_cycle": "monthly", "listen_ip": "0.0.0.0", "entry_ip_mode": "custom", "entry_address": "198.51.100.20", "public_ipv4": "198.51.100.20", "port_range_start": 10000, "port_range_end": 11000,
+		"name": "process-node", "renewal_cycle": "monthly", "mtu_mode": "disabled", "listen_ip": "0.0.0.0", "entry_ip_mode": "custom", "entry_address": "198.51.100.20", "public_ipv4": "198.51.100.20", "port_range_start": 10000, "port_range_end": 11000,
 	}, http.StatusCreated)
 	serverID := int64(created["server"].(map[string]any)["id"].(float64))
 	enroll := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/servers/"+strconv.FormatInt(serverID, 10)+"/enroll-token", token, map[string]any{}, http.StatusOK)
@@ -149,7 +149,9 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 		t.Fatal(err)
 	}
 
-	waitProcessCondition(t, 30*time.Second, func() bool {
+	// Each deployment still runs the NTP check and DNS benchmark against the
+	// network; a host without outbound access spends their full timeouts.
+	waitProcessCondition(t, 60*time.Second, func() bool {
 		response := processJSONRequestOptional(baseURL, http.MethodGet, "/api/v1/ui/configuration-sync", token, nil)
 		for _, raw := range processArray(response["configuration_sync"]) {
 			state, _ := raw.(map[string]any)
