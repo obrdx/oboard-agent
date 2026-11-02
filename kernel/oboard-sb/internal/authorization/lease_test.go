@@ -148,3 +148,88 @@ func TestAuthorizationPersistenceFailureDeniesExistingGrants(t *testing.T) {
 		t.Fatal("persistence failure retained old authorization")
 	}
 }
+
+func TestNewerSnapshotGrantingDeniedKeyLiftsDenialAndOlderReplayCannot(t *testing.T) {
+	now := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "authorization.json")
+	deadline := now.Add(MaxLifetime).Format(time.RFC3339Nano)
+	store := NewStore(path, nil)
+	granted := &Lease{Revision: 3, Sequence: 1, Digest: "d3", IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"a": deadline, "k": deadline}}
+	if err := store.Update(granted); err != nil {
+		t.Fatal(err)
+	}
+	// A transient revision drops k and denies it.
+	dropped := &Lease{Revision: 4, Sequence: 1, Digest: "d4", IssuedAt: now.Add(time.Second).Format(time.RFC3339Nano), Grants: map[string]string{"a": deadline}, Denied: []string{"k"}}
+	if err := store.Update(dropped); err != nil {
+		t.Fatal(err)
+	}
+	if store.Allows("k", now.Add(time.Second)) {
+		t.Fatal("denial not honored")
+	}
+	// A renewal of the denying revision cannot re-admit k.
+	renewal := &Lease{Revision: 4, Sequence: 2, Digest: "d4", IssuedAt: now.Add(2 * time.Second).Format(time.RFC3339Nano), Grants: map[string]string{"a": deadline}}
+	if err := store.Update(renewal); err != nil {
+		t.Fatal(err)
+	}
+	if !store.Denied("k") {
+		t.Fatal("renewal of the denying revision lifted the denial")
+	}
+	// The next revision grants k again: the denial is lifted and persisted.
+	regranted := &Lease{Revision: 5, Sequence: 1, Digest: "d5", IssuedAt: now.Add(3 * time.Second).Format(time.RFC3339Nano), Grants: map[string]string{"a": deadline, "k": deadline}}
+	if err := store.Update(regranted); err != nil {
+		t.Fatal(err)
+	}
+	if store.Denied("k") || !store.Allows("k", now.Add(3*time.Second)) {
+		t.Fatal("newer grant did not lift the denial")
+	}
+	restarted := NewStore(path, nil)
+	if restarted.Denied("k") || !restarted.Allows("k", now.Add(3*time.Second)) {
+		t.Fatal("lifted denial reappeared after restart")
+	}
+	// Replaying the older grant set is superseded and changes nothing.
+	if err := restarted.Update(granted); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Status().Revision != 5 {
+		t.Fatalf("older snapshot replaced newer: %+v", restarted.Status())
+	}
+	// An emergency denial at a revision the installed grant does not exceed
+	// survives, and the same snapshot redelivered does not lift it.
+	if err := restarted.Deny([]string{"k"}, 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Update(regranted); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Allows("k", now.Add(4*time.Second)) {
+		t.Fatal("same-revision snapshot lifted an emergency denial")
+	}
+}
+
+func TestIdenticalSnapshotLiftsStaleDenialOfGrantedKey(t *testing.T) {
+	now := time.Now().UTC()
+	deadline := now.Add(MaxLifetime).Format(time.RFC3339Nano)
+	store := NewStore(filepath.Join(t.TempDir(), "authorization.json"), nil)
+	lease := &Lease{Revision: 7, Sequence: 1, Digest: "d7", IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"k": deadline}}
+	// A node that persisted a denial from an older revision while already
+	// holding a newer lease that grants the key self-heals on redelivery.
+	if err := store.Deny([]string{"k"}, 6); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Deny([]string{"k"}, 6); err != nil {
+		t.Fatal(err)
+	}
+	if store.Allows("k", now) {
+		t.Fatal("stale denial not recorded")
+	}
+	res, err := store.UpdateWithResult(clone(lease))
+	if err != nil || res.Unchanged {
+		t.Fatalf("identical snapshot did not lift stale denial: %+v err=%v", res, err)
+	}
+	if !store.Allows("k", now) {
+		t.Fatal("stale denial still blocks a granted key")
+	}
+}

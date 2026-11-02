@@ -181,7 +181,9 @@ type Status struct {
 }
 
 // Store never lets configuration replay or rollback replace a newer full
-// snapshot, and never lets any snapshot re-admit a denied key.
+// snapshot, and never lets a snapshot at or below a denial's revision re-admit
+// the denied key. Only a strictly newer snapshot that grants the key again
+// lifts its denial.
 type Store struct {
 	mu   sync.Mutex
 	path string
@@ -450,7 +452,7 @@ func (s *Store) updateLocked(incoming *Lease) (UpdateResult, func(), error) {
 			if !reflect.DeepEqual(candidate.Grants, s.lease.Grants) || candidate.Digest != s.lease.Digest || candidate.ContinueWhenDisconnected != s.lease.ContinueWhenDisconnected || !reflect.DeepEqual(candidate.OfflineGrants, s.lease.OfflineGrants) {
 				return UpdateResult{}, nil, ErrConflict
 			}
-			if len(candidate.Denied) == 0 {
+			if len(candidate.Denied) == 0 && !s.hasLiftableDenialLocked(candidate) {
 				return UpdateResult{Unchanged: true}, nil, nil
 			}
 		case orderConflict:
@@ -478,10 +480,16 @@ func (s *Store) updateLocked(incoming *Lease) (UpdateResult, func(), error) {
 		}
 		revoked[key] = struct{}{}
 	}
-	// Denials older than the maximum lifetime and below the installed
-	// revision are redundant: no lease that could grant them can still exist.
+	// A strictly newer snapshot that grants a denied key again supersedes the
+	// denial: every lease that could replay the older grant set is ordered
+	// below it and is refused. Denials older than the maximum lifetime and
+	// below the installed revision are redundant: no lease that could grant
+	// them can still exist.
 	for key, entry := range s.denied {
 		if _, granted := candidate.Grants[key]; granted {
+			if entry.Revision < candidate.Revision {
+				delete(s.denied, key)
+			}
 			continue
 		}
 		at, err := time.Parse(time.RFC3339Nano, entry.At)
@@ -516,9 +524,20 @@ func (s *Store) updateLocked(incoming *Lease) (UpdateResult, func(), error) {
 	return out, s.onChange, nil
 }
 
+// hasLiftableDenialLocked reports whether candidate grants a key whose denial
+// it supersedes, so an otherwise identical snapshot still lifts it.
+func (s *Store) hasLiftableDenialLocked(candidate *Lease) bool {
+	for key, entry := range s.denied {
+		if _, granted := candidate.Grants[key]; granted && entry.Revision < candidate.Revision {
+			return true
+		}
+	}
+	return false
+}
+
 // Deny adds keys to the watermark without installing a snapshot. It is the
 // emergency path: the keys are refused immediately and stay refused until a
-// later full snapshot has made the denial redundant.
+// strictly newer full snapshot grants them again or makes the denial redundant.
 func (s *Store) Deny(keys []string, revision int64) error {
 	s.mu.Lock()
 	s.load()
