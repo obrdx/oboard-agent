@@ -105,6 +105,8 @@ func metricReportFromHealth(reportID string, health model.HealthReport) model.Me
 		CPUUsagePercent:    health.CPUUsagePercent,
 		MemoryUsedBytes:    health.MemoryUsedBytes,
 		MemoryTotalBytes:   health.MemoryTotalBytes,
+		SwapUsedBytes:      health.SwapUsedBytes,
+		SwapTotalBytes:     health.SwapTotalBytes,
 		DiskUsedBytes:      health.DiskBytes,
 		DiskTotalBytes:     health.DiskTotalBytes,
 		TCPConnectionCount: health.TCPConnectionCount,

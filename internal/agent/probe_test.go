@@ -463,3 +463,17 @@ func TestParseProcUptime(t *testing.T) {
 		}
 	}
 }
+
+func TestParseLinuxMeminfoReportsSwap(t *testing.T) {
+	mem := parseLinuxMeminfo("MemTotal:        2048000 kB\nMemFree:          100000 kB\nMemAvailable:    1024000 kB\nSwapTotal:       1000000 kB\nSwapFree:         750000 kB\n")
+	if mem.total != 2048000*1024 || mem.used != 1024000*1024 {
+		t.Fatalf("physical memory = %+v", mem)
+	}
+	if mem.swapTotal != 1000000*1024 || mem.swapUsed != 250000*1024 {
+		t.Fatalf("swap = %+v", mem)
+	}
+	noSwap := parseLinuxMeminfo("MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n")
+	if noSwap.swapTotal != 0 || noSwap.swapUsed != 0 {
+		t.Fatalf("no-swap host = %+v", noSwap)
+	}
+}

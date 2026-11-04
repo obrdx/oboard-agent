@@ -25,6 +25,8 @@ type systemProbe struct {
 	CPUUsagePercent           float64
 	MemoryUsedBytes           uint64
 	MemoryTotalBytes          uint64
+	SwapUsedBytes             uint64
+	SwapTotalBytes            uint64
 	AgentMemoryBytes          uint64
 	DiskUsedBytes             uint64
 	DiskTotalBytes            uint64
@@ -74,9 +76,11 @@ func sampleSystemProbe(cpuName string, previousCPU procCPU) (systemProbe, procCP
 	if runtime.GOOS != "linux" {
 		return samplePlatformSystemProbe(p, previousCPU)
 	}
-	if total, used := linuxMemory(); total > 0 {
-		p.MemoryTotalBytes = total
-		p.MemoryUsedBytes = used
+	if mem := readLinuxMeminfo(); mem.total > 0 {
+		p.MemoryTotalBytes = mem.total
+		p.MemoryUsedBytes = mem.used
+		p.SwapTotalBytes = mem.swapTotal
+		p.SwapUsedBytes = mem.swapUsed
 	}
 	if rss := linuxAgentRSS(); rss > 0 {
 		p.AgentMemoryBytes = rss
@@ -226,13 +230,29 @@ func cpuCountFromCPUInfo(content string) int {
 	return count
 }
 
+type linuxMeminfo struct {
+	total, used, swapTotal, swapUsed uint64
+}
+
 func linuxMemory() (total uint64, used uint64) {
+	mem := readLinuxMeminfo()
+	return mem.total, mem.used
+}
+
+func readLinuxMeminfo() linuxMeminfo {
 	b, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
-		return 0, 0
+		return linuxMeminfo{}
 	}
-	var available uint64
-	for _, line := range strings.Split(string(b), "\n") {
+	return parseLinuxMeminfo(string(b))
+}
+
+// parseLinuxMeminfo derives physical usage from MemAvailable and swap usage
+// from SwapTotal - SwapFree. A host without swap reports zero swap total.
+func parseLinuxMeminfo(content string) linuxMeminfo {
+	var mem linuxMeminfo
+	var available, swapFree uint64
+	for _, line := range strings.Split(content, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -240,15 +260,22 @@ func linuxMemory() (total uint64, used uint64) {
 		v, _ := strconv.ParseUint(fields[1], 10, 64)
 		switch strings.TrimSuffix(fields[0], ":") {
 		case "MemTotal":
-			total = v * 1024
+			mem.total = v * 1024
 		case "MemAvailable":
 			available = v * 1024
+		case "SwapTotal":
+			mem.swapTotal = v * 1024
+		case "SwapFree":
+			swapFree = v * 1024
 		}
 	}
-	if total > available {
-		used = total - available
+	if mem.total > available {
+		mem.used = mem.total - available
 	}
-	return total, used
+	if mem.swapTotal > swapFree {
+		mem.swapUsed = mem.swapTotal - swapFree
+	}
+	return mem
 }
 
 func linuxAgentRSS() uint64 {

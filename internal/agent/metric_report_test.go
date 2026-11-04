@@ -149,3 +149,10 @@ func TestMetricReportQueueReplaysInOrderOverWebSocket(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestMetricReportFromHealthCarriesSwap(t *testing.T) {
+	report := metricReportFromHealth("r1", model.HealthReport{Timestamp: time.Unix(100, 0), MemoryUsedBytes: 10, MemoryTotalBytes: 20, SwapUsedBytes: 3, SwapTotalBytes: 8})
+	if report.SwapUsedBytes != 3 || report.SwapTotalBytes != 8 {
+		t.Fatalf("swap not carried: %#v", report)
+	}
+}
