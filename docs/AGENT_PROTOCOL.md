@@ -980,6 +980,19 @@ online Agent and an unchanged deployed config containing the target outbound.
 An already pending/running task for the same path and fingerprint is returned
 instead of creating a duplicate. The endpoint does not deploy configuration.
 
+### `apply_agent_local_policy`
+
+Signed Controller task that sets one Agent-local gate in `local-security.json`. Advertised by capability `agent_local_policy_remote_v1`; Controller exposes it as `servers.agent_policy.set` (MCP and `POST /api/v1/servers/:id/agent-policy`).
+
+Payload: `{"feature":"plugins"|"lan","allow":bool}`.
+
+- `plugins` allow clears `deny.plugins_enabled` and sets `allow.plugins_enabled`; deny sets `deny.plugins_enabled` and also clears `allow.lan_requests_enabled`, so reopening plugins never revives LAN.
+- `lan` allow sets `allow.lan_requests_enabled` and opens the plugins gate it depends on; deny clears only the LAN flag.
+- Hardened mode accepts only a change that opens nothing; any request that would open a gate fails with result `error: "hardened_local_only"` and leaves the file untouched. The task never changes `mode` and never touches `remote_terminal` or `mcp_enabled`.
+- Identical repeats succeed with `changed: false`.
+
+Result: `{"feature","allow","changed","local_mode","local_allow":{remote_terminal,mcp_enabled,plugins_enabled,lan_requests_enabled},"error"?,"message"?}`. `local_allow` is the enforced set; Controller stores it as the server remote-access status immediately, and every later hello/heartbeat reports the same value.
+
 ### `apply_vpngate_pool`
 
 Installs the ordered membership of one `vpngate-pool` kernel outbound. The

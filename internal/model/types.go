@@ -767,6 +767,7 @@ const (
 	AgentTaskTypeApplyStealth          = "apply_stealth"
 	AgentTaskTypeApplyVPNGatePool      = "apply_vpngate_pool"
 	AgentTaskTypeProbeVPNGate          = "probe_vpngate_candidates"
+	AgentTaskTypeApplyLocalPolicy      = "apply_agent_local_policy"
 )
 
 // AgentCapabilityStealth is advertised by Agents that can switch the local

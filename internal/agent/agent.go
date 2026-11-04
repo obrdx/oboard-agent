@@ -1807,6 +1807,8 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(result)
 		}
 		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeApplyLocalPolicy:
+		return r.applyLocalPolicy(task.PayloadJSON)
 	case model.AgentTaskTypeCheckTime:
 		var plan model.TimeCheckPlan
 		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {
@@ -3738,7 +3740,8 @@ func (r *Runner) agentCapabilities(kernelCapabilities []string) []string {
 		"offline_service_control_v1",
 		model.AgentCapabilityRuntimeUsers,
 		"runtime_users_snell_psk_control_v1",
-		model.AgentCapabilityStealth, model.RuntimeSecurityCapability, model.ProxyDSCPCapability)
+		model.AgentCapabilityStealth, model.RuntimeSecurityCapability, model.ProxyDSCPCapability,
+		model.AgentCapabilityLocalPolicyRemote)
 	capabilities = append(capabilities, networkDiagnosticCapabilities()...)
 	for _, capability := range kernelCapabilities {
 		if capability == "account_activity_local_v1" {

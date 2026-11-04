@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"encoding/json"
+	"errors"
 	"path/filepath"
 
 	"github.com/OboardProject/oboard-agent/internal/agentsecurity"
@@ -52,4 +54,28 @@ func (r *Runner) localGateAllows(feature string) bool {
 
 func localGateFeatureForExec(origin, mode string) string {
 	return "mcp_enabled"
+}
+
+// applyLocalPolicy handles the signed apply_agent_local_policy task. The
+// enforced gates are reported in the result and in every later hello and
+// heartbeat, so Controller always acts on what the node enforces.
+func (r *Runner) applyLocalPolicy(payload string) (string, string) {
+	var plan model.AgentLocalPolicyPlan
+	if err := json.Unmarshal([]byte(payload), &plan); err != nil {
+		return "failed", jsonResult(err.Error())
+	}
+	result := model.AgentLocalPolicyResult{Feature: plan.Feature, Allow: plan.Allow}
+	policy, changed, err := r.localSecurityStore().ApplyRemote(plan.Feature, plan.Allow)
+	if err != nil {
+		current := r.localSecurityPolicy()
+		result.LocalMode, result.LocalAllow, result.Message = current.Mode, current.ReportedAllow(), err.Error()
+		if errors.Is(err, agentsecurity.ErrHardenedLocalOnly) {
+			result.Error = model.LocalPolicyErrorHardened
+		}
+		raw, _ := json.Marshal(result)
+		return "failed", string(raw)
+	}
+	result.Changed, result.LocalMode, result.LocalAllow = changed, policy.Mode, policy.ReportedAllow()
+	raw, _ := json.Marshal(result)
+	return "succeeded", string(raw)
 }

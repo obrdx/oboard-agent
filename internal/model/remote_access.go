@@ -43,8 +43,10 @@ type RemoteAccessLocalAllow struct {
 	MCPEnabled     bool `json:"mcp_enabled"`
 	PluginsEnabled bool `json:"plugins_enabled"`
 	// LANRequests is the separate local switch for plugin lan.request. It is
-	// closed by default in every mode and only `obag remote-access allow lan`
-	// opens it; Controller can never raise it.
+	// closed by default in every mode. `obag remote-access allow lan` opens it
+	// locally; in Standard mode Controller may also open it with the signed
+	// apply_agent_local_policy task, in Hardened mode Controller may only
+	// close it.
 	LANRequests bool `json:"lan_requests_enabled"`
 }
 
@@ -122,3 +124,35 @@ const (
 	InteractiveOriginHuman = "human"
 	InteractiveOriginMCP   = "mcp"
 )
+
+// AgentCapabilityLocalPolicyRemote is advertised by Agents that accept the
+// signed apply_agent_local_policy task for the plugins and lan gates.
+const AgentCapabilityLocalPolicyRemote = "agent_local_policy_remote_v1"
+
+// Local policy features Controller may set remotely.
+const (
+	LocalPolicyFeaturePlugins = "plugins"
+	LocalPolicyFeatureLAN     = "lan"
+)
+
+// LocalPolicyErrorHardened is the result error when Controller asks a
+// Hardened Agent to open a gate; only the node operator can do that.
+const LocalPolicyErrorHardened = "hardened_local_only"
+
+// AgentLocalPolicyPlan is the apply_agent_local_policy payload. Opening lan
+// also opens plugins, which lan depends on; closing plugins closes lan.
+type AgentLocalPolicyPlan struct {
+	Feature string `json:"feature"`
+	Allow   bool   `json:"allow"`
+}
+
+// AgentLocalPolicyResult reports the enforced gates after the change.
+type AgentLocalPolicyResult struct {
+	Feature    string                 `json:"feature"`
+	Allow      bool                   `json:"allow"`
+	Changed    bool                   `json:"changed"`
+	LocalMode  string                 `json:"local_mode"`
+	LocalAllow RemoteAccessLocalAllow `json:"local_allow"`
+	Error      string                 `json:"error,omitempty"`
+	Message    string                 `json:"message,omitempty"`
+}

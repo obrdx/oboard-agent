@@ -183,3 +183,51 @@ func (s *Store) SetAllow(feature string, allow bool) error {
 	}
 	return s.Save(policy)
 }
+
+// ErrHardenedLocalOnly refuses a remote request to open a gate on a Hardened
+// node: Hardened means Controller can close gates but never open them.
+var ErrHardenedLocalOnly = errors.New("hardened mode: only the node operator can open this gate (obag remote-access allow)")
+
+// ApplyRemote applies a Controller-signed change to the plugins or lan gate.
+// In Standard mode both directions are accepted; in Hardened mode only a
+// change that does not open anything is. Opening lan also opens plugins,
+// which lan depends on. It reports whether the enforced gates changed.
+func (s *Store) ApplyRemote(feature string, allow bool) (Policy, bool, error) {
+	policy, err := s.Load()
+	if err != nil {
+		return Policy{}, false, err
+	}
+	before := policy.ReportedAllow()
+	next := policy
+	switch feature {
+	case model.LocalPolicyFeaturePlugins:
+		next.Allow.PluginsEnabled = allow
+		next.Deny.Plugins = !allow
+		if !allow {
+			next.Allow.LANRequests = false
+		}
+	case model.LocalPolicyFeatureLAN:
+		next.Allow.LANRequests = allow
+		if allow {
+			next.Allow.PluginsEnabled = true
+			next.Deny.Plugins = false
+		}
+	default:
+		return policy, false, errors.New("unknown local policy feature")
+	}
+	after := next.ReportedAllow()
+	if policy.Normalized().Mode == model.RemoteAccessModeHardened && opens(before, after) {
+		return policy, false, ErrHardenedLocalOnly
+	}
+	if before == after && policy.Allow == next.Allow && policy.Deny == next.Deny {
+		return policy, false, nil
+	}
+	if err := s.Save(next); err != nil {
+		return policy, false, err
+	}
+	return next.Normalized(), before != after, nil
+}
+
+func opens(before, after model.RemoteAccessLocalAllow) bool {
+	return (!before.PluginsEnabled && after.PluginsEnabled) || (!before.LANRequests && after.LANRequests)
+}
