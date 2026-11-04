@@ -58,22 +58,33 @@ func snellPayloadTarget(t *testing.T, payload []byte) M.Socksaddr {
 func reserveSnellTestPorts(t *testing.T, count int) ([]int, func()) {
 	t.Helper()
 	// Keep every reservation open so ephemeral allocation cannot return one port twice.
-	var listeners []net.Listener
+	// Inbounds such as Shadowsocks bind TCP and UDP on the same port, so a port is
+	// only usable when both families are free and both stay held until release.
+	var closers []io.Closer
 	release := func() {
-		for _, ln := range listeners {
-			_ = ln.Close()
+		for _, c := range closers {
+			_ = c.Close()
 		}
-		listeners = nil
+		closers = nil
 	}
 	t.Cleanup(release)
-	ports := make([]int, count)
-	for i := range ports {
+	ports := make([]int, 0, count)
+	for attempt := 0; len(ports) < count; attempt++ {
+		if attempt >= 64*count {
+			t.Fatalf("could not reserve %d ports free on both TCP and UDP", count)
+		}
 		ln, err := net.Listen("tcp", "[::]:0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		listeners = append(listeners, ln)
-		ports[i] = ln.Addr().(*net.TCPAddr).Port
+		port := ln.Addr().(*net.TCPAddr).Port
+		pc, err := net.ListenPacket("udp", fmt.Sprintf("[::]:%d", port))
+		if err != nil {
+			_ = ln.Close()
+			continue
+		}
+		closers = append(closers, ln, pc)
+		ports = append(ports, port)
 	}
 	return ports, release
 }
@@ -88,6 +99,11 @@ func TestReserveSnellTestPorts(t *testing.T) {
 		if err == nil {
 			_ = ln.Close()
 			t.Fatalf("reserved port %d was available before release", port)
+		}
+		pc, err := net.ListenPacket("udp", fmt.Sprintf("[::]:%d", port))
+		if err == nil {
+			_ = pc.Close()
+			t.Fatalf("reserved UDP port %d was available before release", port)
 		}
 	}
 	release()
