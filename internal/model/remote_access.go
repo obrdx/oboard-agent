@@ -42,6 +42,10 @@ type RemoteAccessLocalAllow struct {
 	RemoteTerminal bool `json:"remote_terminal"`
 	MCPEnabled     bool `json:"mcp_enabled"`
 	PluginsEnabled bool `json:"plugins_enabled"`
+	// LANRequests is the separate local switch for plugin lan.request. It is
+	// closed by default in every mode and only `obag remote-access allow lan`
+	// opens it; Controller can never raise it.
+	LANRequests bool `json:"lan_requests_enabled"`
 }
 
 type RemoteExecCommand struct {

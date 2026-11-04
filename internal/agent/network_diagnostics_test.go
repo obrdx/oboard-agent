@@ -108,3 +108,31 @@ func TestNetworkDiagnosticCapabilitiesMatchThePlatform(t *testing.T) {
 		}
 	}
 }
+
+func TestLANRequestRequiresPluginOriginAndLocalLANGate(t *testing.T) {
+	task := func(origin string) model.AgentTask {
+		payload := model.LANRequestTaskPayload{
+			NetworkDiagnosticEnvelope: model.NetworkDiagnosticEnvelope{ProtocolVersion: 1, OperationID: "op-1", Origin: origin, RunID: "run-1", PluginID: "acme.demo", InstanceID: 1, IssuedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute).UTC()},
+			TargetID:                  "router", Scheme: "http", Address: "10.10.18.1", Port: 5000, PathPrefix: "/", Method: "GET", Path: "/", TimeoutMS: 1000,
+		}
+		if origin == model.NetworkDiagnosticOriginMonitor {
+			payload.RunID, payload.PluginID, payload.InstanceID = "", "", 0
+		}
+		raw, _ := json.Marshal(payload)
+		return model.AgentTask{Type: model.AgentTaskTypeLANRequest, PayloadJSON: string(raw)}
+	}
+	run := func(r *Runner, origin string) string {
+		status, raw := r.executeNetworkDiagnosticTask(task(origin))
+		return diagnosticCode(t, status, raw)
+	}
+	allowed := diagnosticRunner(t, true)
+	if code := run(allowed, model.NetworkDiagnosticOriginPlugin); code != model.NetworkDiagnosticCodeLANDisabled {
+		t.Fatalf("standard mode without allow lan must refuse, got %s", code)
+	}
+	if code := run(allowed, model.NetworkDiagnosticOriginMonitor); code != model.NetworkDiagnosticCodeInvalidInput {
+		t.Fatalf("monitor origin must be refused, got %s", code)
+	}
+	if code := run(diagnosticRunner(t, false), model.NetworkDiagnosticOriginPlugin); code != model.NetworkDiagnosticCodeLocalGateDenied {
+		t.Fatalf("plugins gate must be checked first, got %s", code)
+	}
+}

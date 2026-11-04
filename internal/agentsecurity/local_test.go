@@ -79,3 +79,39 @@ func TestPluginLocalPolicyDoesNotImportRetiredGrant(t *testing.T) {
 		t.Fatal("retired script grant must not grant plugin access")
 	}
 }
+
+func TestLANLocalGateIsClosedByDefaultAndNeedsPlugins(t *testing.T) {
+	for _, mode := range []string{model.RemoteAccessModeStandard, model.RemoteAccessModeHardened} {
+		t.Run(mode, func(t *testing.T) {
+			store := NewStore(filepath.Join(t.TempDir(), "local-security.json"), nil)
+			if err := store.SetMode(mode); err != nil {
+				t.Fatal(err)
+			}
+			policy, _ := store.Load()
+			if policy.Allows("lan") || policy.ReportedAllow().LANRequests {
+				t.Fatalf("lan gate must default closed in %s", mode)
+			}
+			if err := store.SetAllow("lan", true); err != nil {
+				t.Fatal(err)
+			}
+			policy, _ = store.Load()
+			if mode == model.RemoteAccessModeHardened && policy.Allows("lan") {
+				t.Fatal("lan gate must also require the plugins gate")
+			}
+			if err := store.SetAllow("plugins", true); err != nil {
+				t.Fatal(err)
+			}
+			policy, _ = store.Load()
+			if !policy.Allows("lan") || !policy.ReportedAllow().LANRequests {
+				t.Fatalf("explicit allow must open the lan gate in %s", mode)
+			}
+			if err := store.SetAllow("plugins", false); err != nil {
+				t.Fatal(err)
+			}
+			policy, _ = store.Load()
+			if policy.Allows("lan") || policy.ReportedAllow().LANRequests {
+				t.Fatal("denying plugins must close the lan gate")
+			}
+		})
+	}
+}

@@ -12,6 +12,6 @@ func networkDiagnosticCapabilities() []string {
 		model.AgentCapabilityRouteMonitor, model.AgentCapabilityGoogleRegionProbe, model.AgentCapabilityNetworkTCPMonitor,
 		model.AgentCapabilityNetworkDiagnostics, model.AgentCapabilityNetworkPing,
 		model.AgentCapabilityNetworkTraceICMP, model.AgentCapabilityNetworkTraceUDP, model.AgentCapabilityNetworkTraceTCP,
-		model.AgentCapabilityNetworkTCPProbe, model.AgentCapabilityNetworkDNSLookup, model.AgentCapabilityNetworkHTTPProbe,
+		model.AgentCapabilityNetworkTCPProbe, model.AgentCapabilityNetworkDNSLookup, model.AgentCapabilityNetworkHTTPProbe, model.AgentCapabilityLANRequest,
 	}
 }

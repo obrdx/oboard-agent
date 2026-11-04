@@ -174,7 +174,7 @@ func (c *managementConsole) printHelp() {
 	fmt.Fprintln(c.out, "  obag check           检查与主控的连接")
 	fmt.Fprintln(c.out, "  obag remote-access status")
 	fmt.Fprintln(c.out, "  obag remote-access harden|standard")
-	fmt.Fprintln(c.out, "  obag remote-access allow|deny terminal|mcp|plugins")
+	fmt.Fprintln(c.out, "  obag remote-access allow|deny terminal|mcp|plugins|lan")
 }
 
 func (c *managementConsole) printStatus() {
@@ -323,6 +323,7 @@ func (c *managementConsole) runRemoteAccess(args []string) int {
 		fmt.Fprintf(c.out, "允许远程终端：%v\n", policy.Allow.RemoteTerminal)
 		fmt.Fprintf(c.out, "允许 MCP 远程控制：%v\n", policy.Allow.MCPEnabled)
 		fmt.Fprintf(c.out, "允许插件网络诊断：%v\n", policy.Allows("plugins"))
+		fmt.Fprintf(c.out, "允许插件访问内网目标：%v\n", policy.Allows("lan"))
 		return 0
 	}
 	if os.Geteuid() != 0 {
@@ -344,7 +345,7 @@ func (c *managementConsole) runRemoteAccess(args []string) int {
 		fmt.Fprintln(c.out, "已切换为 Standard。远程访问仍受 Controller 全局/服务器开关约束。")
 	case "allow", "deny":
 		if len(args) < 2 {
-			fmt.Fprintln(c.errOut, "请指定 terminal、mcp 或 plugins。")
+			fmt.Fprintln(c.errOut, "请指定 terminal、mcp、plugins 或 lan。")
 			return 2
 		}
 		if err := store.SetAllow(args[1], strings.EqualFold(args[0], "allow")); err != nil {

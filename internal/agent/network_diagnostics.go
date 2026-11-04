@@ -16,7 +16,7 @@ import (
 
 func isNetworkDiagnosticTask(taskType string) bool {
 	switch taskType {
-	case model.AgentTaskTypeNetworkPing, model.AgentTaskTypeNetworkTrace, model.AgentTaskTypeNetworkTCP, model.AgentTaskTypeNetworkDNS, model.AgentTaskTypeNetworkHTTP, model.AgentTaskTypeGoogleRegion:
+	case model.AgentTaskTypeNetworkPing, model.AgentTaskTypeNetworkTrace, model.AgentTaskTypeNetworkTCP, model.AgentTaskTypeNetworkDNS, model.AgentTaskTypeNetworkHTTP, model.AgentTaskTypeGoogleRegion, model.AgentTaskTypeLANRequest:
 		return true
 	default:
 		return false
@@ -89,6 +89,9 @@ func (r *Runner) executeNetworkDiagnosticTask(task model.AgentTask) (string, str
 	if decoded && envelope.Origin == model.NetworkDiagnosticOriginMonitor && task.Type != model.AgentTaskTypeNetworkTrace && task.Type != model.AgentTaskTypeGoogleRegion && task.Type != model.AgentTaskTypeNetworkTCP {
 		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "monitor origin is restricted to route traces, TCP probes and Google region probes")
 	}
+	if task.Type == model.AgentTaskTypeLANRequest && (!decoded || envelope.Origin != model.NetworkDiagnosticOriginPlugin) {
+		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "LAN requests require the plugin origin")
+	}
 	if task.Type == model.AgentTaskTypeGoogleRegion && (!decoded || envelope.Origin != model.NetworkDiagnosticOriginMonitor) {
 		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "Google region probes require the monitor origin")
 	}
@@ -155,6 +158,18 @@ func (r *Runner) executeNetworkDiagnosticTask(task model.AgentTask) (string, str
 			return status, failure
 		}
 		result, err = netdiag.HTTPProbe(ctx, resolver, dialer, payload)
+	case model.AgentTaskTypeLANRequest:
+		var payload model.LANRequestTaskPayload
+		if decodeErr := decodeDiagnosticPayload(task.PayloadJSON, &payload); decodeErr != nil {
+			return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "malformed LAN request payload")
+		}
+		if status, failure, ok := r.validateDiagnosticEnvelope(payload.NetworkDiagnosticEnvelope); !ok {
+			return status, failure
+		}
+		if !r.localGateAllows("lan") {
+			return diagnosticFailure(model.NetworkDiagnosticCodeLANDisabled, "agent local security policy does not allow plugin LAN requests (obag remote-access allow lan)")
+		}
+		result, err = netdiag.LANRequest(ctx, dialer, netdiag.InterfaceAddresses, payload)
 	case model.AgentTaskTypeGoogleRegion:
 		var payload model.GoogleRegionTaskPayload
 		if decodeErr := decodeDiagnosticPayload(task.PayloadJSON, &payload); decodeErr != nil {

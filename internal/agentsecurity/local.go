@@ -56,6 +56,8 @@ func (p Policy) Allows(feature string) bool {
 			return false
 		}
 		return p.Mode != model.RemoteAccessModeHardened || p.Allow.PluginsEnabled
+	case "lan", "lan_requests", "lan_requests_enabled":
+		return p.Allow.LANRequests && p.Allows("plugins")
 	case "remote_terminal":
 		return p.Mode != model.RemoteAccessModeHardened || p.Allow.RemoteTerminal
 	case "mcp_remote_operations", "mcp_structured_exec", "mcp_raw_shell", "mcp_interactive_terminal", "mcp_interactive", "mcp_enabled":
@@ -120,11 +122,12 @@ func (s *Store) loadLocked() (Policy, error) {
 	return policy.Normalized(), nil
 }
 
-// ReportedAllow is the allow set sent to Controller. The plugin gate is
-// reported as enforced because Controller uses it directly as the gate.
+// ReportedAllow is the allow set sent to Controller. The plugin and LAN gates
+// are reported as enforced because Controller uses them directly as gates.
 func (p Policy) ReportedAllow() model.RemoteAccessLocalAllow {
 	allow := p.Allow
 	allow.PluginsEnabled = p.Allows("plugins")
+	allow.LANRequests = p.Allows("lan")
 	return allow
 }
 
@@ -173,6 +176,8 @@ func (s *Store) SetAllow(feature string, allow bool) error {
 	case "plugins", "plugins_enabled":
 		policy.Allow.PluginsEnabled = allow
 		policy.Deny.Plugins = !allow
+	case "lan", "lan_requests", "lan_requests_enabled":
+		policy.Allow.LANRequests = allow
 	default:
 		return errors.New("unknown remote-access feature")
 	}
