@@ -24,7 +24,7 @@ func TestRejectedTrafficRangeRecoversFromPersistedCheckpoint(t *testing.T) {
 				rejected = append(rejected, trafficAcceptedReport{ReportID: id, Status: status, AcceptedUpload: 100, AcceptedDownload: 200})
 			}
 			applyTrafficLedgerResponse(state, trafficReportResponse{StreamCheckpoints: []trafficStreamCheckpoint{checkpoint}, AcceptedReports: rejected})
-			if !state.RecoveryRequired || len(state.PendingReports) != 0 {
+			if state.RecoveryRequired || state.Streams[streamID].Status != status || len(state.PendingReports) != 0 {
 				t.Fatalf("rejected state = %+v", state)
 			}
 			if err := runner.saveTrafficState(*state); err != nil {
@@ -83,7 +83,7 @@ func TestTrafficCheckpointRecoveryPreservesCounterSafety(t *testing.T) {
 		{"upload below checkpoint", "ce_1", "2026-10", trafficStatusCheckpointGap, 99, 300, trafficStatusCounterRegression},
 		{"download below checkpoint", "ce_1", "2026-10", trafficStatusCheckpointGap, 300, 199, trafficStatusCounterRegression},
 		{"existing regression", "ce_1", "2026-10", trafficStatusCounterRegression, 300, 300, trafficStatusCounterRegression},
-		{"different epoch", "ce_other", "2026-10", trafficStatusCheckpointGap, 300, 300, trafficStatusEpochConflict},
+		{"different epoch", "ce_other", "2026-10", trafficStatusCheckpointGap, 300, 300, trafficStatusCheckpointGap},
 		{"different period", "ce_1", "other-period", trafficStatusCheckpointGap, 300, 300, trafficStatusCheckpointGap},
 		{"missing epoch", "", "2026-10", trafficStatusCheckpointGap, 300, 300, trafficStatusCheckpointGap},
 		{"missing period", "ce_1", "", trafficStatusCheckpointGap, 300, 300, trafficStatusCheckpointGap},
@@ -93,7 +93,7 @@ func TestTrafficCheckpointRecoveryPreservesCounterSafety(t *testing.T) {
 			stream := &trafficStreamState{Source: "core", SnapshotKey: "user:7", CounterEpoch: "ce_1", PeriodKey: "2026-10", UserID: 7, ObservedUpload: tc.upload, ObservedDownload: tc.download, Status: tc.status}
 			state := &trafficLocalState{Streams: map[string]*trafficStreamState{id: stream}, PendingReports: map[string]*trafficPendingRange{}, RecoveryRequired: true}
 			applyTrafficLedgerResponse(state, trafficReportResponse{StreamCheckpoints: []trafficStreamCheckpoint{{Source: "core", StreamID: id, CounterEpoch: tc.epoch, PeriodKey: tc.period, AcceptedUpload: 100, AcceptedDownload: 200, Status: trafficStatusCheckpointGap}}})
-			if !state.RecoveryRequired || stream.Status != tc.want || len(state.PendingReports) != 0 {
+			if state.RecoveryRequired || stream.Status != tc.want || len(state.PendingReports) != 0 {
 				t.Fatalf("unsafe recovery: recovery=%v stream=%+v", state.RecoveryRequired, stream)
 			}
 		})
@@ -163,7 +163,7 @@ func TestTrafficReportLoopRecoversGapWithoutRebilling(t *testing.T) {
 	if err := runner.collectAndReportTraffic(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if rejected != 1 || !state.RecoveryRequired || billedDownload != 0 {
+	if rejected != 1 || state.RecoveryRequired || state.Streams[streamID].Status != trafficStatusCheckpointGap || billedDownload != 0 {
 		t.Fatalf("gap not reproduced: rejected=%d state=%+v", rejected, state)
 	}
 	if err := runner.collectAndReportTraffic(context.Background()); err != nil {

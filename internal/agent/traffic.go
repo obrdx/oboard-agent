@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"github.com/OboardProject/oboard-agent/internal/securefile"
+	"maps"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -84,6 +86,55 @@ type trafficStreamState struct {
 	// state file; without it, every stream this Agent ever saw was resent in
 	// every batch for the lifetime of the installation.
 	LastObservedAt string `json:"last_observed_at,omitempty"`
+	// A kernel counter never decreases within one epoch, so a same-epoch
+	// regression means the recorded position can no longer be trusted. The
+	// stream is then rebased: it keeps the kernel epoch, but reports under a
+	// derived ledger epoch whose zero is the kernel value at the rebase.
+	// Observed* and Accepted* are always in ledger coordinates; the kernel
+	// position is Base* plus them.
+	RebaseGeneration int   `json:"rebase_generation,omitempty"`
+	BaseUpload       int64 `json:"base_upload,omitempty"`
+	BaseDownload     int64 `json:"base_download,omitempty"`
+	// Regressed* hold the latest kernel counter while a regressed stream
+	// waits for its rebase.
+	RegressedUpload    int64 `json:"regressed_upload,omitempty"`
+	RegressedDownload  int64 `json:"regressed_download,omitempty"`
+	RegressionObserved bool  `json:"regression_observed,omitempty"`
+}
+
+// ledgerEpoch is the counter epoch this stream reports to the Controller.
+func (s *trafficStreamState) ledgerEpoch() string {
+	if s == nil || s.RebaseGeneration <= 0 || s.CounterEpoch == "" {
+		if s == nil {
+			return ""
+		}
+		return s.CounterEpoch
+	}
+	return s.CounterEpoch + "~r" + strconv.Itoa(s.RebaseGeneration)
+}
+
+// kernelAcknowledgement expresses the accepted checkpoint in the kernel's own
+// epoch and coordinates, which is the only form the kernel can apply.
+func (s *trafficStreamState) kernelAcknowledgement() trafficCounterCheckpoint {
+	return trafficCounterCheckpoint{
+		CounterEpoch: s.CounterEpoch, PeriodKey: s.PeriodKey,
+		Upload: s.BaseUpload + s.AcceptedUpload, Download: s.BaseDownload + s.AcceptedDownload,
+	}
+}
+
+func (s *trafficStreamState) markCounterRegression(rawUpload, rawDownload int64, reason string) {
+	s.Status = trafficStatusCounterRegression
+	s.LastError = reason
+	s.RegressedUpload = rawUpload
+	s.RegressedDownload = rawDownload
+	s.RegressionObserved = true
+}
+
+func (s *trafficStreamState) resetRebase() {
+	s.RebaseGeneration = 0
+	s.BaseUpload, s.BaseDownload = 0, 0
+	s.RegressedUpload, s.RegressedDownload = 0, 0
+	s.RegressionObserved = false
 }
 
 type trafficPendingRange struct {
@@ -351,6 +402,20 @@ func (r *Runner) collectAndReportTraffic(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := r.reportTrafficLedger(ctx, state, items); err != nil {
+		return err
+	}
+	// A stream that just rebuilt from a Controller checkpoint, or was rebased,
+	// can report its owed range now instead of one interval later. In steady
+	// state the answered snapshot queues nothing and no second request is made.
+	before := len(state.PendingReports)
+	r.observeTrafficSnapshotLocked(state, items, false)
+	if len(state.PendingReports) <= before {
+		return nil
+	}
+	if err := r.saveTrafficState(*state); err != nil {
+		return err
+	}
 	return r.reportTrafficLedger(ctx, state, items)
 }
 
@@ -419,25 +484,56 @@ func (r *Runner) observeTrafficSnapshotLocked(state *trafficLocalState, items []
 		period := strings.TrimSpace(item.PeriodKey)
 		epochChanged := stream.CounterEpoch != "" && stream.CounterEpoch != item.CounterEpoch
 		if epochChanged {
+			// A new kernel epoch restarts the counters from zero, which also
+			// completely resolves any regression or rebase of the old one.
 			stream.AcceptedUpload = 0
 			stream.AcceptedDownload = 0
-			if stream.Status == trafficStatusCounterRegression {
+			stream.resetRebase()
+			if stream.Status == trafficStatusCounterRegression || stream.Status == trafficStatusEpochConflict {
 				stream.Status = trafficStatusHealthy
 				stream.LastError = ""
 			}
 		}
-		if stream.CounterEpoch == item.CounterEpoch && stream.PeriodKey == period && (item.Upload < stream.ObservedUpload || item.Download < stream.ObservedDownload) {
-			stream.Status = trafficStatusCounterRegression
-			stream.LastError = "counter regression in the same epoch"
-			stream.ObservedUpload = item.Upload
-			stream.ObservedDownload = item.Download
+		if stream.Status == trafficStatusCounterRegression && !epochChanged {
+			// Waiting for the rebase; remember where the kernel counter is now.
+			stream.RegressedUpload = item.Upload
+			stream.RegressedDownload = item.Download
+			stream.RegressionObserved = true
+			changed = true
+			continue
+		}
+		ledgerUpload := item.Upload - stream.BaseUpload
+		ledgerDownload := item.Download - stream.BaseDownload
+		samePeriod := stream.CounterEpoch == item.CounterEpoch && stream.PeriodKey == period
+		regression := ""
+		switch {
+		case samePeriod && (ledgerUpload < stream.ObservedUpload || ledgerDownload < stream.ObservedDownload):
+			regression = "counter regression in the same epoch"
+		case !recovering && !state.RecoveryRequired && !trafficStreamAwaitsCheckpoint(stream.Status) &&
+			(ledgerUpload < stream.AcceptedUpload || ledgerDownload < stream.AcceptedDownload):
+			regression = "observed counters are below the accepted checkpoint"
+		}
+		if regression != "" {
+			// The anomaly belongs to this stream alone. Bytes it observed
+			// beyond the accepted checkpoint before the regression are still
+			// owed, so they are queued before the stream waits for its rebase.
+			if r.queueUnsettledTrafficLocked(state, streamID, stream, now) {
+				changed = true
+			}
+			if stream.CounterEpoch == "" {
+				stream.CounterEpoch = item.CounterEpoch
+			}
+			if stream.PeriodKey == "" {
+				stream.PeriodKey = period
+			}
+			stream.markCounterRegression(item.Upload, item.Download, regression)
 			changed = true
 			continue
 		}
 		stream.CounterEpoch = item.CounterEpoch
 		stream.PeriodKey = period
-		stream.ObservedUpload = item.Upload
-		stream.ObservedDownload = item.Download
+		stream.ObservedUpload = ledgerUpload
+		stream.ObservedDownload = ledgerDownload
 		if recovering || state.RecoveryRequired {
 			if stream.Status == "" || stream.Status == trafficStatusHealthy {
 				stream.Status = trafficStatusRecovering
@@ -445,39 +541,18 @@ func (r *Runner) observeTrafficSnapshotLocked(state *trafficLocalState, items []
 			changed = true
 			continue
 		}
-		if stream.Status == trafficStatusCounterRegression || stream.Status == trafficStatusCheckpointGap || stream.Status == trafficStatusCheckpointOverlap || stream.Status == trafficStatusEpochConflict {
+		if trafficStreamAwaitsCheckpoint(stream.Status) {
 			changed = true
 			continue
 		}
-		if item.Upload < stream.AcceptedUpload || item.Download < stream.AcceptedDownload {
-			stream.Status = trafficStatusCounterRegression
-			stream.LastError = "observed counters are below the accepted checkpoint"
-			changed = true
-			continue
-		}
-		if item.Upload == stream.AcceptedUpload && item.Download == stream.AcceptedDownload {
+		if ledgerUpload == stream.AcceptedUpload && ledgerDownload == stream.AcceptedDownload {
 			if stream.Status != trafficStatusHealthy {
 				stream.Status = trafficStatusHealthy
 				changed = true
 			}
 			continue
 		}
-		pendingExists := false
-		for _, pending := range state.PendingReports {
-			if pending != nil && pending.StreamID == streamID {
-				pendingExists = true
-				break
-			}
-		}
-		if !pendingExists {
-			for _, pending := range state.Pending {
-				if pending.SnapshotKey == item.Key {
-					pendingExists = true
-					break
-				}
-			}
-		}
-		if pendingExists {
+		if trafficStreamHasPending(state, streamID, item.Key) {
 			continue
 		}
 		if item.InboundID <= 0 || item.UserID <= 0 {
@@ -490,26 +565,122 @@ func (r *Runner) observeTrafficSnapshotLocked(state *trafficLocalState, items []
 			stream.Status = trafficStatusHealthy
 			continue
 		}
-		report := &trafficPendingRange{
-			Source: source, StreamID: streamID, CounterEpoch: item.CounterEpoch, PeriodKey: period,
-			UserID: item.UserID, FromUpload: stream.AcceptedUpload, ToUpload: item.Upload,
-			FromDownload: stream.AcceptedDownload, ToDownload: item.Download,
-			StartedAt: now, EndedAt: now, SnapshotKey: item.Key,
-		}
-		if item.InboundID > 0 {
-			inboundID := item.InboundID
-			report.InboundID = &inboundID
-		}
-		if item.PathID > 0 {
-			pathID := item.PathID
-			report.PathID = &pathID
-		}
-		report.ReportID = trafficRangeReportID(r.Config().AgentID, report)
-		state.PendingReports[report.ReportID] = report
+		r.queueTrafficRangeLocked(state, streamID, stream, stream.ObservedUpload, stream.ObservedDownload, now)
 		stream.Status = trafficStatusHealthy
 		changed = true
 	}
-	_ = recovering
+	return changed
+}
+
+// trafficStreamAwaitsCheckpoint reports a stream whose accepted position is in
+// doubt until the Controller answers with its checkpoint.
+func trafficStreamAwaitsCheckpoint(status string) bool {
+	switch status {
+	case trafficStatusCounterRegression, trafficStatusCheckpointGap, trafficStatusCheckpointOverlap, trafficStatusEpochConflict:
+		return true
+	default:
+		return false
+	}
+}
+
+func trafficStreamHasPending(state *trafficLocalState, streamID, snapshotKey string) bool {
+	for _, pending := range state.PendingReports {
+		if pending != nil && pending.StreamID == streamID {
+			return true
+		}
+	}
+	for _, pending := range state.Pending {
+		if snapshotKey != "" && pending.SnapshotKey == snapshotKey {
+			return true
+		}
+	}
+	return false
+}
+
+// queueTrafficRangeLocked queues the range from the stream's accepted
+// checkpoint to the given ledger position under the stream's ledger identity.
+func (r *Runner) queueTrafficRangeLocked(state *trafficLocalState, streamID string, stream *trafficStreamState, toUpload, toDownload int64, now string) {
+	report := &trafficPendingRange{
+		Source: stream.Source, StreamID: streamID, CounterEpoch: stream.ledgerEpoch(), PeriodKey: stream.PeriodKey,
+		UserID: stream.UserID, FromUpload: stream.AcceptedUpload, ToUpload: toUpload,
+		FromDownload: stream.AcceptedDownload, ToDownload: toDownload,
+		StartedAt: now, EndedAt: now, SnapshotKey: stream.SnapshotKey,
+	}
+	if stream.InboundID > 0 {
+		inboundID := stream.InboundID
+		report.InboundID = &inboundID
+	}
+	if stream.PathID > 0 {
+		pathID := stream.PathID
+		report.PathID = &pathID
+	}
+	report.ReportID = trafficRangeReportID(r.Config().AgentID, report)
+	state.PendingReports[report.ReportID] = report
+}
+
+// queueUnsettledTrafficLocked keeps the bytes a stream observed beyond its
+// accepted checkpoint before a regression. They were counted while the
+// stream was consistent, so they stay owed even though the stream is about to
+// be rebased. Nothing is queued while the accepted position itself is still
+// unknown, because a range from an unconfirmed checkpoint could bill twice.
+func (r *Runner) queueUnsettledTrafficLocked(state *trafficLocalState, streamID string, stream *trafficStreamState, now string) bool {
+	if state.RecoveryRequired || stream.Status != trafficStatusHealthy {
+		return false
+	}
+	if stream.InboundID <= 0 || stream.UserID <= 0 || stream.CounterEpoch == "" || strings.TrimSpace(stream.PeriodKey) == "" {
+		return false
+	}
+	toUpload := max(stream.ObservedUpload, stream.AcceptedUpload)
+	toDownload := max(stream.ObservedDownload, stream.AcceptedDownload)
+	if toUpload == stream.AcceptedUpload && toDownload == stream.AcceptedDownload {
+		return false
+	}
+	if trafficStreamHasPending(state, streamID, stream.SnapshotKey) {
+		return false
+	}
+	r.queueTrafficRangeLocked(state, streamID, stream, toUpload, toDownload, now)
+	return true
+}
+
+// rebaseRegressedTrafficStreamsLocked is the explicit way out of a counter
+// regression. A regressed stream is rebased once its regression has reached
+// the Controller in a successful report and every range it still owed has
+// been answered: from then on it reports under a new ledger epoch that starts
+// at the kernel's current counter, so its own accounting resumes without
+// re-billing bytes the Controller already accepted. The old segment and its
+// checkpoint stay untouched in the Controller ledger.
+func rebaseRegressedTrafficStreamsLocked(state *trafficLocalState, reported map[string]bool) bool {
+	if state == nil || len(reported) == 0 {
+		return false
+	}
+	changed := false
+	for streamID, stream := range state.Streams {
+		if stream == nil || stream.Status != trafficStatusCounterRegression || !reported[streamID] || stream.CounterEpoch == "" {
+			continue
+		}
+		if trafficStreamHasPending(state, streamID, stream.SnapshotKey) {
+			continue
+		}
+		rawUpload, rawDownload := stream.BaseUpload+stream.ObservedUpload, stream.BaseDownload+stream.ObservedDownload
+		if stream.RegressionObserved {
+			rawUpload, rawDownload = stream.RegressedUpload, stream.RegressedDownload
+		}
+		generation := stream.RebaseGeneration + 1
+		stream.resetRebase()
+		stream.RebaseGeneration = generation
+		stream.BaseUpload, stream.BaseDownload = max(rawUpload, 0), max(rawDownload, 0)
+		stream.ObservedUpload, stream.ObservedDownload = 0, 0
+		stream.AcceptedUpload, stream.AcceptedDownload = 0, 0
+		stream.Status = trafficStatusHealthy
+		stream.LastError = ""
+		if stream.SnapshotKey != "" {
+			if state.Acknowledged == nil {
+				state.Acknowledged = map[string]trafficCounterCheckpoint{}
+			}
+			state.Acknowledged[stream.SnapshotKey] = stream.kernelAcknowledgement()
+		}
+		changed = true
+	}
 	return changed
 }
 
@@ -693,9 +864,16 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 	if state == nil {
 		return nil
 	}
+	streams := trafficStreamWireBatch(state, items)
+	reportedRegressions := map[string]bool{}
+	for _, stream := range streams {
+		if stream.Status == trafficStatusCounterRegression {
+			reportedRegressions[stream.StreamID] = true
+		}
+	}
 	req := map[string]any{
 		"agent_instance_id": state.AgentInstanceID,
-		"streams":           trafficStreamWireBatch(state, items),
+		"streams":           streams,
 		"reports":           trafficLedgerReportBatch(state.PendingReports),
 	}
 	if err := r.postControllerJSON(ctx, "/api/v1/agent/traffic-reports", req, &resp, true); err != nil {
@@ -707,6 +885,9 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 	}
 	stage = "checkpoint_persist"
 	applyTrafficLedgerResponse(state, resp)
+	if rebaseRegressedTrafficStreamsLocked(state, reportedRegressions) {
+		summarizeTrafficSyncStatus(state)
+	}
 	if err := r.saveTrafficState(*state); err != nil {
 		return err
 	}
@@ -948,16 +1129,18 @@ func trafficStreamWireBatch(state *trafficLocalState, items []trafficSnapshotIte
 			InboundID: inboundID, PathID: pathID, CurrentUpload: upload, CurrentDownload: download, Status: status,
 		})
 	}
-	for _, item := range items {
-		add(item.Source, item.Key, item.CounterEpoch, item.PeriodKey, item.UserID, item.InboundID, item.PathID, item.Upload, item.Download, "")
-	}
+	// Local stream state goes first: it carries the ledger identity, which
+	// differs from the raw kernel counter once a stream has been rebased.
 	if state != nil {
 		for _, stream := range state.Streams {
 			if stream == nil {
 				continue
 			}
-			add(stream.Source, stream.SnapshotKey, stream.CounterEpoch, stream.PeriodKey, stream.UserID, stream.InboundID, stream.PathID, stream.ObservedUpload, stream.ObservedDownload, stream.Status)
+			add(stream.Source, stream.SnapshotKey, stream.ledgerEpoch(), stream.PeriodKey, stream.UserID, stream.InboundID, stream.PathID, stream.ObservedUpload, stream.ObservedDownload, stream.Status)
 		}
+	}
+	for _, item := range items {
+		add(item.Source, item.Key, item.CounterEpoch, item.PeriodKey, item.UserID, item.InboundID, item.PathID, item.Upload, item.Download, "")
 	}
 	if len(out) > 1000 {
 		out = out[:1000]
@@ -1008,15 +1191,16 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 			stream = &trafficStreamState{Source: checkpoint.Source}
 			state.Streams[checkpoint.StreamID] = stream
 		}
-		if checkpoint.CounterEpoch != "" && stream.CounterEpoch != "" && checkpoint.CounterEpoch != stream.CounterEpoch {
-			stream.Status = trafficStatusEpochConflict
-			stream.LastError = "controller epoch does not match local counters"
+		if checkpoint.CounterEpoch != "" && stream.CounterEpoch != "" && checkpoint.CounterEpoch != stream.ledgerEpoch() {
+			// A checkpoint for another counter segment (an earlier kernel
+			// epoch, or the segment before a rebase) says nothing about the
+			// one this stream counts now.
 			continue
 		}
-		sameIdentity := checkpoint.CounterEpoch != "" && checkpoint.CounterEpoch == stream.CounterEpoch &&
+		sameIdentity := checkpoint.CounterEpoch != "" && stream.CounterEpoch != "" &&
 			checkpoint.PeriodKey != "" && checkpoint.PeriodKey == stream.PeriodKey && stream.SnapshotKey != ""
 		counterRegressed := stream.Status == trafficStatusCounterRegression
-		if checkpoint.CounterEpoch != "" {
+		if stream.CounterEpoch == "" && checkpoint.CounterEpoch != "" {
 			stream.CounterEpoch = checkpoint.CounterEpoch
 		}
 		if checkpoint.PeriodKey != "" {
@@ -1028,13 +1212,12 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 			stream.Status = checkpoint.Status
 			// A rejected range does not invalidate the Controller's checkpoint.
 			// Rebuild from it only when the local counters cover the same identity.
-			if sameIdentity && (checkpoint.Status == trafficStatusCheckpointGap || checkpoint.Status == trafficStatusCheckpointOverlap) {
+			if sameIdentity && (checkpoint.Status == trafficStatusCheckpointGap || checkpoint.Status == trafficStatusCheckpointOverlap || checkpoint.Status == trafficStatusEpochConflict) {
 				switch {
 				case counterRegressed:
 					stream.Status = trafficStatusCounterRegression
 				case stream.ObservedUpload < checkpoint.AcceptedUpload || stream.ObservedDownload < checkpoint.AcceptedDownload:
-					stream.Status = trafficStatusCounterRegression
-					stream.LastError = "observed counters are below the accepted checkpoint"
+					stream.markCounterRegression(stream.BaseUpload+stream.ObservedUpload, stream.BaseDownload+stream.ObservedDownload, "observed counters are below the accepted checkpoint")
 				default:
 					stream.Status = trafficStatusHealthy
 					stream.LastError = ""
@@ -1043,64 +1226,81 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 		} else if stream.Status == trafficStatusRecovering || stream.Status == trafficStatusStateCorrupt {
 			stream.Status = trafficStatusHealthy
 		}
+		if counterRegressed && stream.Status != trafficStatusCounterRegression {
+			// The Controller does not end a regression; only the rebase does.
+			stream.Status = trafficStatusCounterRegression
+		}
 		if stream.SnapshotKey != "" {
-			state.Acknowledged[stream.SnapshotKey] = trafficCounterCheckpoint{CounterEpoch: stream.CounterEpoch, PeriodKey: stream.PeriodKey, Upload: stream.AcceptedUpload, Download: stream.AcceptedDownload}
+			state.Acknowledged[stream.SnapshotKey] = stream.kernelAcknowledgement()
 		}
 	}
 	for _, accepted := range resp.AcceptedReports {
 		report := state.PendingReports[accepted.ReportID]
+		if report == nil {
+			continue
+		}
+		stream := state.Streams[report.StreamID]
+		// A range from an earlier segment drains, but its checkpoint belongs
+		// to that segment and must not move the current one.
+		current := stream != nil && report.CounterEpoch == stream.ledgerEpoch()
 		switch accepted.Status {
 		case "", "accepted", "duplicate", "covered":
-			if report != nil {
-				if stream := state.Streams[report.StreamID]; stream != nil {
-					stream.AcceptedUpload = accepted.AcceptedUpload
-					stream.AcceptedDownload = accepted.AcceptedDownload
-					if stream.AcceptedUpload == 0 && stream.AcceptedDownload == 0 {
-						stream.AcceptedUpload = report.ToUpload
-						stream.AcceptedDownload = report.ToDownload
-					}
+			if current {
+				stream.AcceptedUpload = accepted.AcceptedUpload
+				stream.AcceptedDownload = accepted.AcceptedDownload
+				if stream.AcceptedUpload == 0 && stream.AcceptedDownload == 0 {
+					stream.AcceptedUpload = report.ToUpload
+					stream.AcceptedDownload = report.ToDownload
+				}
+				if stream.Status != trafficStatusCounterRegression {
 					stream.Status = trafficStatusHealthy
 					stream.LastError = ""
-					if report.SnapshotKey != "" {
-						state.Acknowledged[report.SnapshotKey] = trafficCounterCheckpoint{CounterEpoch: report.CounterEpoch, PeriodKey: report.PeriodKey, Upload: stream.AcceptedUpload, Download: stream.AcceptedDownload}
-					}
 				}
-				delete(state.PendingReports, accepted.ReportID)
+				if stream.SnapshotKey != "" {
+					state.Acknowledged[stream.SnapshotKey] = stream.kernelAcknowledgement()
+				}
 			}
+			delete(state.PendingReports, accepted.ReportID)
 		case trafficStatusCheckpointGap, trafficStatusCheckpointOverlap, trafficStatusEpochConflict, "rejected":
+			// Every rejection stays with its own stream. A terminal reason
+			// means the user, binding, inbound, or path is gone, so dropping the
+			// range is the complete resolution. Any other rejection marks only
+			// this stream, which rebuilds from the Controller checkpoint on the
+			// next answer while every other stream keeps reporting.
 			terminal := accepted.Status == "rejected" && terminalTrafficRejectionReason(accepted.Reason)
-			if report != nil {
-				if stream := state.Streams[report.StreamID]; stream != nil && !terminal {
-					stream.Status = accepted.Status
-					stream.LastError = accepted.Status
-					if accepted.Status != "rejected" {
-						stream.AcceptedUpload = accepted.AcceptedUpload
-						stream.AcceptedDownload = accepted.AcceptedDownload
-					}
+			if current && !terminal && stream.Status != trafficStatusCounterRegression {
+				stream.Status = accepted.Status
+				stream.LastError = accepted.Status
+				if accepted.Status != "rejected" {
+					stream.AcceptedUpload = accepted.AcceptedUpload
+					stream.AcceptedDownload = accepted.AcceptedDownload
 				}
-				delete(state.PendingReports, accepted.ReportID)
 			}
-			if terminal {
-				// The user, binding, inbound, or path this report accounts
-				// against is gone. Dropping it is the complete resolution;
-				// local counters are still consistent, so no recovery is due.
-				continue
-			}
-			state.RecoveryRequired = true
+			delete(state.PendingReports, accepted.ReportID)
 		}
 	}
 	if len(resp.StreamCheckpoints) > 0 {
 		state.RecoveryRequired = false
-		if state.Sync.Status == trafficStatusStateCorrupt {
-			state.Sync.Status = trafficStatusRecovering
-		}
-	}
-	if !state.RecoveryRequired && state.Sync.Status != trafficStatusCounterRegression && state.Sync.Status != trafficStatusStateCorrupt {
-		state.Sync.Status = trafficStatusHealthy
 	}
 	state.Sync.LastSuccess = time.Now().UTC().Format(time.RFC3339Nano)
+	summarizeTrafficSyncStatus(state)
+}
+
+// summarizeTrafficSyncStatus derives the diagnostic sync status. Only a lost
+// or unreadable state file holds the whole server in recovery; a stream
+// anomaly is reported here but never stops the other streams.
+func summarizeTrafficSyncStatus(state *trafficLocalState) {
+	if state.RecoveryRequired {
+		if state.Sync.Status != trafficStatusStateCorrupt {
+			state.Sync.Status = trafficStatusRecovering
+			state.Sync.LastError = ""
+		}
+		return
+	}
+	state.Sync.Status = trafficStatusHealthy
 	state.Sync.LastError = ""
-	for _, stream := range state.Streams {
+	for _, streamID := range slices.Sorted(maps.Keys(state.Streams)) {
+		stream := state.Streams[streamID]
 		if stream == nil {
 			continue
 		}
@@ -1108,7 +1308,7 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 		case trafficStatusCounterRegression, trafficStatusCheckpointGap, trafficStatusCheckpointOverlap, trafficStatusEpochConflict, trafficStatusStateCorrupt:
 			state.Sync.Status = stream.Status
 			state.Sync.LastError = stream.LastError
-			state.RecoveryRequired = true
+			return
 		}
 	}
 }
