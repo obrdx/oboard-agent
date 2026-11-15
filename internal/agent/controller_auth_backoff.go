@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"math"
 	"math/rand"
 	"net/http"
@@ -141,12 +142,49 @@ func (b *controllerAuthBackoff) clear() {
 
 func controllerBackoffClass(status int) string {
 	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
 		return "auth"
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
 		return "throttle"
 	default:
 		return ""
+	}
+}
+
+// agentIdentityCode is set when the Controller rejected this Agent's binding.
+// A 403 without one of these codes is a resource rule and must not pause
+// traffic, authorization or user callbacks.
+func agentIdentityCode(status int, header http.Header, body []byte) string {
+	if header != nil {
+		if code := strings.TrimSpace(header.Get("X-Oboard-Agent-Auth")); isAgentIdentityCode(code) {
+			return code
+		}
+	}
+	var payload struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &payload) == nil && isAgentIdentityCode(payload.Code) {
+		return payload.Code
+	}
+	text := strings.ToLower(string(body))
+	for _, code := range []string{"identity_unknown", "token_mismatch", "identity_replaced"} {
+		if strings.Contains(text, code) {
+			return code
+		}
+	}
+	if status == http.StatusUnauthorized {
+		return "identity_unknown"
+	}
+	return ""
+}
+
+func isAgentIdentityCode(code string) bool {
+	switch strings.TrimSpace(code) {
+	case "identity_unknown", "token_mismatch", "identity_replaced":
+		return true
+	default:
+		return false
 	}
 }
 

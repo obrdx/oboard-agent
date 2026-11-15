@@ -179,6 +179,12 @@ func (r *Runner) controllerJSONOverTransport(ctx context.Context, method, path s
 		return err
 	}
 	if auth {
+		if resp.Status >= 300 {
+			if code := agentIdentityCode(resp.Status, http.Header(resp.Headers), resp.Body); code != "" {
+				r.controllerAuth.armWithResponse(time.Now(), http.StatusUnauthorized, http.Header(resp.Headers))
+				return fmt.Errorf("controller rejected agent identity code=%s: %s", code, agentpresenceReason(code))
+			}
+		}
 		if isControllerAuthRejection(resp.Status) {
 			r.controllerAuth.armWithResponse(time.Now(), resp.Status, http.Header(resp.Headers))
 		} else if resp.Status < 300 {

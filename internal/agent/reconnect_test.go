@@ -47,8 +47,11 @@ func TestReconnectDelayClassifiesAuthVsNetwork(t *testing.T) {
 	if !isAuthReconnectError(errors.New("websocket: bad handshake: 401 Unauthorized")) {
 		t.Fatal("401 should be classified as auth")
 	}
-	if !isAuthReconnectError(errors.New("403 Forbidden")) {
-		t.Fatal("403 should be classified as auth")
+	if isAuthReconnectError(errors.New("403 Forbidden")) {
+		t.Fatal("a resource 403 is not an identity rejection")
+	}
+	if !isAuthReconnectError(errors.New("controller rejected agent identity code=token_mismatch")) {
+		t.Fatal("token mismatch should be classified as auth")
 	}
 	if isAuthReconnectError(errors.New("dial tcp: connection refused")) {
 		t.Fatal("connection refused should use network jitter")

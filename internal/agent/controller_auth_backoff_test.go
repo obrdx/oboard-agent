@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,7 +19,6 @@ import (
 func TestControllerRejectionPausesAuthenticatedCallbacks(t *testing.T) {
 	for name, status := range map[string]int{
 		"unauthorized":        http.StatusUnauthorized,
-		"forbidden":           http.StatusForbidden,
 		"too many requests":   http.StatusTooManyRequests,
 		"service unavailable": http.StatusServiceUnavailable,
 	} {
@@ -48,6 +48,45 @@ func TestControllerRejectionPausesAuthenticatedCallbacks(t *testing.T) {
 
 // Unauthenticated calls (enrollment) are never gated, and a successful
 // authenticated call releases the pause.
+func TestResourceForbiddenDoesNotPauseIdentity(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests.Add(1)
+		http.Error(w, "inbound does not belong to this agent", http.StatusForbidden)
+	}))
+	defer server.Close()
+	runner := newTestRunner(t, Config{ConfigPath: filepath.Join(t.TempDir(), "agent.json"), ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "token", StateDir: t.TempDir()})
+	for i := 0; i < 3; i++ {
+		if err := runner.postControllerJSON(context.Background(), "/api/v1/agent/traffic-reports", map[string]any{}, nil, true); err == nil {
+			t.Fatal("the resource refusal must still be an error")
+		}
+	}
+	if got := requests.Load(); got < 3 {
+		t.Fatalf("resource 403 paused later callbacks after %d requests", got)
+	}
+}
+
+func TestIdentityCodePausesCallbacks(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests.Add(1)
+		w.Header().Set("X-Oboard-Agent-Auth", "token_mismatch")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":"token_mismatch","error":"agent token does not match the controller binding"}`))
+	}))
+	defer server.Close()
+	runner := newTestRunner(t, Config{ConfigPath: filepath.Join(t.TempDir(), "agent.json"), ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "stale", StateDir: t.TempDir()})
+	if err := runner.postControllerJSON(context.Background(), "/api/v1/agent/traffic-reports", map[string]any{}, nil, true); err == nil || !strings.Contains(err.Error(), "token_mismatch") {
+		t.Fatalf("identity rejection = %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		_ = runner.postControllerJSON(context.Background(), "/api/v1/agent/traffic-reports", map[string]any{}, nil, true)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("controller received %d requests, want the identity rejection to pause callbacks", got)
+	}
+}
+
 func TestControllerAuthBackoffScopeAndRelease(t *testing.T) {
 	var requests atomic.Int64
 	reject := atomic.Bool{}

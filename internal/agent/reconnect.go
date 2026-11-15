@@ -60,14 +60,32 @@ func isAuthReconnectError(err error) bool {
 	if errors.As(err, &authError) {
 		return true
 	}
-	if status := websocketDialStatus(err); status == http.StatusUnauthorized || status == http.StatusForbidden {
+	if status := websocketDialStatus(err); status == http.StatusUnauthorized {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "401") || strings.Contains(msg, "403") || strings.Contains(msg, "unauthorized") || strings.Contains(msg, "forbidden") || strings.Contains(msg, "identity") {
+	if strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized") {
 		return true
 	}
+	for _, code := range []string{"identity_unknown", "token_mismatch", "identity_replaced"} {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
 	return false
+}
+
+func agentpresenceReason(code string) string {
+	switch code {
+	case "identity_unknown":
+		return "主控没有这台 Agent 的身份记录"
+	case "token_mismatch":
+		return "本机凭证与主控绑定不一致"
+	case "identity_replaced":
+		return "这台服务器已重新注册，当前凭证已失效"
+	default:
+		return code
+	}
 }
 
 func websocketDialStatus(err error) int {
