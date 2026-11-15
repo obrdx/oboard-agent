@@ -1,6 +1,6 @@
 module github.com/sagernet/sing-snell
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/sagernet/sing v0.8.12-0.20260727003324-d096a164bc7f

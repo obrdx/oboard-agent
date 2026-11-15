@@ -1,6 +1,6 @@
 module github.com/OboardProject/oboard-agent/kernel/oboard-sb
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/anytls/sing-anytls v0.0.11
