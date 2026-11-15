@@ -691,10 +691,5 @@ func writeAtomic(path string, data []byte) error {
 	if err := os.Rename(file.Name(), path); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return syncDir(filepath.Dir(path))
 }

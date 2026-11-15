@@ -750,12 +750,7 @@ func (r *RuntimeUsers) persist(state persistedUsers) error {
 	if err = os.Rename(tmp, r.path); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(r.path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return syncDir(filepath.Dir(r.path))
 }
 
 func userSelectorTag(inbound string) string {
