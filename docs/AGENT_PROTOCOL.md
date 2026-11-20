@@ -231,6 +231,16 @@ persistent-version rule as other desired state: an older version is rejected,
 an identical same-version plan is idempotent, and different content under the
 same version is rejected.
 
+A target may carry `family` (`ipv4` or `ipv6`). Agent then resolves only A or
+AAAA records, rejects an IP literal of the other family, dials `tcp4`/`tcp6`
+and the matching ICMP, and reports `目标没有 IPv6 地址` when the name has no
+record of that family or `本机无 IPv6 网络` when the host has no route for it,
+instead of `目标未响应`. An absent `family` keeps the system choice. Controller
+sends `family` only to Agents that advertise `latency_probe_family_v1`, so an
+older Agent's plan digest keeps matching; preset targets are filtered by the
+task family on Controller either way. The built-in public target uses `ipv4`,
+or `ipv6` on a server whose effective stack is `ipv6_only`.
+
 `latency_probe_report` is Agent-to-Controller and is independent of task
 results. Agent sends the oldest unacknowledged report first and retries it no
 more often than every 10 seconds until Controller returns

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/logging"
@@ -121,7 +122,7 @@ func (r *Runner) runLatencyProbeTaskWithProbe(ctx context.Context, plan model.La
 					host = target.URL
 				}
 			}
-			latencies, failures := targetProbe(batchCtx, host, target.Port, samples, interval, timeout)
+			latencies, failures := targetProbe(withLatencyProbeFamily(batchCtx, target.Family), host, target.Port, samples, interval, timeout)
 			applyLatencyStats(&items[i], latencies, samples)
 			if len(failures) > 0 {
 				items[i].Error = boundedLatencyProbeError(failures[0])
@@ -175,6 +176,15 @@ func validateLatencyProbeTarget(target model.LatencyProbeTarget, mode model.Late
 	}
 	if mode != model.LatencyProbeModeTCP && mode != model.LatencyProbeModeICMP && mode != model.LatencyProbeModeHTTP {
 		return errors.New("延迟测试方式无效")
+	}
+	switch target.Family {
+	case "":
+	case model.NetworkFamilyIPv4, model.NetworkFamilyIPv6:
+		if addr, err := netip.ParseAddr(host); err == nil && latencyProbeAddrFamily(addr) != target.Family {
+			return errors.New("目标 IP 地址与地址族不一致")
+		}
+	default:
+		return errors.New("延迟测试地址族无效")
 	}
 	if mode == model.LatencyProbeModeHTTP {
 		u, err := url.Parse(target.URL)
@@ -251,7 +261,7 @@ func validCustomProbeHostname(host string) bool {
 func icmpProbeSamplesContext(ctx context.Context, host string, _ int, count int, interval, timeout time.Duration) ([]int64, []string) {
 	target, err := resolveLatencyProbeIP(ctx, host)
 	if err != nil {
-		return nil, []string{"无法解析目标 IP 地址"}
+		return nil, []string{latencyProbeResolveFailure(ctx, err)}
 	}
 	network, bind, protocol := "ip4:icmp", "0.0.0.0", 1
 	var requestType, replyType icmp.Type = ipv4.ICMPTypeEcho, ipv4.ICMPTypeEchoReply
@@ -289,6 +299,9 @@ func icmpProbeSamplesContext(ctx context.Context, host string, _ int, count int,
 			continue
 		}
 		if _, err := conn.WriteTo(payload, &net.IPAddr{IP: net.IP(target.AsSlice()), Zone: target.Zone()}); err != nil {
+			if latencyProbeNoRoute(err) {
+				return latencies, append(failures, latencyProbeNoRouteFailure(target))
+			}
 			failures = append(failures, "无法发送 ICMP 测试请求")
 			continue
 		}
@@ -343,7 +356,11 @@ func tcpProbeSamplesContext(ctx context.Context, host string, port, count int, i
 	}
 	targetIP, err := resolveLatencyProbeIP(ctx, host)
 	if err != nil {
-		return nil, []string{"无法解析目标 IP 地址"}
+		return nil, []string{latencyProbeResolveFailure(ctx, err)}
+	}
+	dialNetwork := "tcp4"
+	if targetIP.Is6() {
+		dialNetwork = "tcp6"
 	}
 	latencies := make([]int64, 0, count)
 	failures := make([]string, 0, count)
@@ -351,10 +368,12 @@ func tcpProbeSamplesContext(ctx context.Context, host string, port, count int, i
 	address := net.JoinHostPort(targetIP.String(), fmt.Sprintf("%d", port))
 	for index := 0; index < count; index++ {
 		started := time.Now()
-		conn, err := dialer.DialContext(ctx, "tcp", address)
+		conn, err := dialer.DialContext(ctx, dialNetwork, address)
 		if err != nil {
 			if ctx.Err() != nil {
 				failures = append(failures, "测试已取消")
+			} else if latencyProbeNoRoute(err) {
+				return latencies, append(failures, latencyProbeNoRouteFailure(targetIP))
 			} else {
 				failures = append(failures, "目标未响应")
 			}
@@ -380,19 +399,94 @@ func tcpProbeSamplesContext(ctx context.Context, host string, port, count int, i
 	return latencies, failures
 }
 
+type latencyProbeFamilyKey struct{}
+
+// withLatencyProbeFamily pins every resolution and dial made under ctx to one
+// address family. An empty family leaves the system choice in place.
+func withLatencyProbeFamily(ctx context.Context, family string) context.Context {
+	if family == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, latencyProbeFamilyKey{}, family)
+}
+
+func latencyProbeFamilyFrom(ctx context.Context) string {
+	family, _ := ctx.Value(latencyProbeFamilyKey{}).(string)
+	return family
+}
+
+func latencyProbeAddrFamily(addr netip.Addr) string {
+	if addr.Unmap().Is4() {
+		return model.NetworkFamilyIPv4
+	}
+	return model.NetworkFamilyIPv6
+}
+
+func latencyProbeFamilyName(family string) string {
+	if family == model.NetworkFamilyIPv6 {
+		return "IPv6"
+	}
+	return "IPv4"
+}
+
+var errLatencyProbeNoFamilyAddress = errors.New("hostname has no address of the requested family")
+
+// resolveLatencyProbeIP resolves host to one address. With a pinned family it
+// queries only A or AAAA records and rejects a literal of the other family.
 func resolveLatencyProbeIP(ctx context.Context, host string) (netip.Addr, error) {
+	family := latencyProbeFamilyFrom(ctx)
 	host = strings.TrimSpace(host)
 	if addr, err := netip.ParseAddr(host); err == nil {
-		return addr.Unmap(), nil
+		addr = addr.Unmap()
+		if family != "" && latencyProbeAddrFamily(addr) != family {
+			return netip.Addr{}, errLatencyProbeNoFamilyAddress
+		}
+		return addr, nil
 	}
-	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	network := "ip"
+	switch family {
+	case model.NetworkFamilyIPv4:
+		network = "ip4"
+	case model.NetworkFamilyIPv6:
+		network = "ip6"
+	}
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, network, host)
 	if err != nil {
+		var dnsErr *net.DNSError
+		if family != "" && errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return netip.Addr{}, errLatencyProbeNoFamilyAddress
+		}
 		return netip.Addr{}, err
 	}
-	if len(addresses) > 0 {
-		return addresses[0].Unmap(), nil
+	for _, address := range addresses {
+		address = address.Unmap()
+		if family == "" || latencyProbeAddrFamily(address) == family {
+			return address, nil
+		}
+	}
+	if family != "" {
+		return netip.Addr{}, errLatencyProbeNoFamilyAddress
 	}
 	return netip.Addr{}, errors.New("hostname has no IP address")
+}
+
+// latencyProbeResolveFailure names why a target could not be resolved.
+func latencyProbeResolveFailure(ctx context.Context, err error) string {
+	if errors.Is(err, errLatencyProbeNoFamilyAddress) {
+		return "目标没有 " + latencyProbeFamilyName(latencyProbeFamilyFrom(ctx)) + " 地址"
+	}
+	return "无法解析目标 IP 地址"
+}
+
+// latencyProbeNoRoute reports a dial or send that failed because this host has
+// no route or usable source address for the target's family, as opposed to a
+// target that did not answer.
+func latencyProbeNoRoute(err error) bool {
+	return errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT)
+}
+
+func latencyProbeNoRouteFailure(target netip.Addr) string {
+	return "本机无 " + latencyProbeFamilyName(latencyProbeAddrFamily(target)) + " 网络"
 }
 
 func newLatencyProbeReportID(agentID string, checkedAt time.Time) string {
@@ -740,7 +834,11 @@ func networkProbeHTTPClient(timeout time.Duration, now func() time.Time) *http.C
 			if err != nil {
 				return nil, err
 			}
-			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", net.JoinHostPort(target.String(), port))
+			dialNetwork := "tcp4"
+			if target.Is6() {
+				dialNetwork = "tcp6"
+			}
+			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, dialNetwork, net.JoinHostPort(target.String(), port))
 		},
 		TLSHandshakeTimeout:    timeout,
 		ResponseHeaderTimeout:  timeout,
@@ -778,7 +876,13 @@ func httpProbeSamplesWithClient(ctx context.Context, address string, count int, 
 		started := time.Now()
 		response, err := client.Do(request)
 		if err != nil {
-			failures = append(failures, "HTTP 请求失败")
+			if errors.Is(err, errLatencyProbeNoFamilyAddress) {
+				failures = append(failures, latencyProbeResolveFailure(ctx, err))
+			} else if latencyProbeFamilyFrom(ctx) != "" && latencyProbeNoRoute(err) {
+				failures = append(failures, "本机无 "+latencyProbeFamilyName(latencyProbeFamilyFrom(ctx))+" 网络")
+			} else {
+				failures = append(failures, "HTTP 请求失败")
+			}
 		} else {
 			response.Body.Close()
 			if response.StatusCode >= 200 && response.StatusCode < 300 {

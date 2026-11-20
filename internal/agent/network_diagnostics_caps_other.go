@@ -10,7 +10,7 @@ import "github.com/OboardProject/oboard-agent/internal/model"
 func networkDiagnosticCapabilities() []string {
 	return []string{
 		"external_outbound_check_v1",
-		model.AgentCapabilityGoogleRegionProbe, model.AgentCapabilityNetworkTCPMonitor, model.AgentCapabilityNetworkDiagnostics, model.AgentCapabilityNetworkTCPProbe,
+		model.AgentCapabilityGoogleRegionProbe, model.AgentCapabilityNetworkTCPMonitor, model.AgentCapabilityLatencyProbeFamily, model.AgentCapabilityNetworkDiagnostics, model.AgentCapabilityNetworkTCPProbe,
 		model.AgentCapabilityNetworkDNSLookup, model.AgentCapabilityNetworkHTTPProbe, model.AgentCapabilityLANRequest,
 	}
 }

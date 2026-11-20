@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -157,5 +160,37 @@ func TestNetworkProbeHTTPInternalTargetsAndProxy(t *testing.T) {
 				t.Fatalf("TCP internal probe: %v %v", samples, failures)
 			}
 		})
+	}
+}
+
+func TestLatencyProbeFamilyPinsResolution(t *testing.T) {
+	v4 := withLatencyProbeFamily(context.Background(), model.NetworkFamilyIPv4)
+	v6 := withLatencyProbeFamily(context.Background(), model.NetworkFamilyIPv6)
+	if addr, err := resolveLatencyProbeIP(v4, "192.0.2.1"); err != nil || !addr.Is4() {
+		t.Fatalf("ipv4 literal under ipv4 = %v, %v", addr, err)
+	}
+	if _, err := resolveLatencyProbeIP(v6, "192.0.2.1"); !errors.Is(err, errLatencyProbeNoFamilyAddress) {
+		t.Fatalf("ipv4 literal under ipv6 = %v", err)
+	}
+	if got := latencyProbeResolveFailure(v6, errLatencyProbeNoFamilyAddress); got != "目标没有 IPv6 地址" {
+		t.Fatalf("failure = %q", got)
+	}
+	if addr, err := resolveLatencyProbeIP(context.Background(), "2001:db8::1"); err != nil || !addr.Is6() {
+		t.Fatalf("auto literal = %v, %v", addr, err)
+	}
+	if !latencyProbeNoRoute(&net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ENETUNREACH)}) {
+		t.Fatal("ENETUNREACH not classified as no route")
+	}
+	target := model.LatencyProbeTarget{ProbeID: "t1-0", Kind: "custom", Host: "192.0.2.1", IP: "192.0.2.1", Port: 80, Family: model.NetworkFamilyIPv6}
+	if err := validateLatencyProbeTarget(target, model.LatencyProbeModeTCP); err == nil {
+		t.Fatal("family/literal mismatch accepted")
+	}
+	target.Family = "ipv5"
+	if err := validateLatencyProbeTarget(target, model.LatencyProbeModeTCP); err == nil {
+		t.Fatal("unknown family accepted")
+	}
+	target.Family = model.NetworkFamilyIPv4
+	if err := validateLatencyProbeTarget(target, model.LatencyProbeModeTCP); err != nil {
+		t.Fatal(err)
 	}
 }

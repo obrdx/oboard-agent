@@ -1137,6 +1137,8 @@ type LatencyProbeTarget struct {
 	Host                string           `json:"host"`
 	IP                  string           `json:"ip,omitempty"`
 	Port                int              `json:"port"`
+	// Family pins resolution and dialing to ipv4 or ipv6. Empty means auto.
+	Family string `json:"family,omitempty"`
 	// IntervalSeconds is the autonomous cadence for this single target. Zero means the plan cadence.
 	IntervalSeconds int `json:"interval_seconds,omitempty"`
 }
