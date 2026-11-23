@@ -166,6 +166,8 @@ type Runner struct {
 	controllerClockMu           sync.RWMutex
 	controllerReference         time.Time
 	controllerReferenceAnchor   time.Time
+	logicalClockReconciling     atomic.Bool
+	logicalClockCheckedAt       atomic.Int64
 	resources                   ResourceInfo
 	tuning                      RuntimeTuning
 	sshInboundManager           *sshInboundManager
