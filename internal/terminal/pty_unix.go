@@ -16,6 +16,7 @@ import (
 // after SIGTERM before it is killed.
 const terminateGrace = 2 * time.Second
 
+// Spawn starts the shell as a direct child of the Agent on a new PTY.
 func Spawn(spec SessionSpec) (*os.File, *exec.Cmd, error) {
 	cmd := exec.Command(spec.Shell, spec.ShellArgs...)
 	cmd.Dir = spec.WorkDir
@@ -23,6 +24,10 @@ func Spawn(spec SessionSpec) (*os.File, *exec.Cmd, error) {
 	if cmd.Env == nil {
 		cmd.Env = []string{}
 	}
+	return startOnPTY(cmd, spec)
+}
+
+func startOnPTY(cmd *exec.Cmd, spec SessionSpec) (*os.File, *exec.Cmd, error) {
 	cols, rows := spec.Cols, spec.Rows
 	if cols <= 0 {
 		cols = 120
@@ -36,8 +41,25 @@ func Spawn(spec SessionSpec) (*os.File, *exec.Cmd, error) {
 	return ptmx, cmd, err
 }
 
-// Start spawns the login shell on a Unix pseudo terminal.
+// Start spawns the login shell on a Unix pseudo terminal. Under systemd the
+// shell runs as its own transient unit so it does not inherit the Agent
+// service sandbox; elsewhere it is a direct child of the Agent.
 func Start(spec SessionSpec) (Session, error) {
+	if launcher, ok := detectServiceLauncher(); ok {
+		cmd, unit, envFile, err := launcher.command(spec)
+		if err != nil {
+			return nil, err
+		}
+		ptmx, cmd, err := startOnPTY(cmd, spec)
+		if err != nil {
+			if ptmx != nil {
+				_ = ptmx.Close()
+			}
+			launcher.stop(unit, envFile)
+			return nil, err
+		}
+		return &unixSession{ptmx: ptmx, cmd: cmd, launcher: launcher, unit: unit, envFile: envFile}, nil
+	}
 	ptmx, cmd, err := Spawn(spec)
 	if err != nil {
 		if ptmx != nil {
@@ -52,6 +74,11 @@ type unixSession struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
 	once sync.Once
+	// launcher, unit and envFile are set when the shell runs as a transient
+	// service-manager unit; Close stops that unit as well.
+	launcher serviceLauncher
+	unit     string
+	envFile  string
 }
 
 func (s *unixSession) Read(p []byte) (int, error)  { return s.ptmx.Read(p) }
@@ -73,6 +100,9 @@ func (s *unixSession) Command() *exec.Cmd { return s.cmd }
 func (s *unixSession) Close() error {
 	s.once.Do(func() {
 		_ = s.ptmx.Close()
+		if s.unit != "" || s.envFile != "" {
+			defer s.launcher.stop(s.unit, s.envFile)
+		}
 		if s.cmd == nil || s.cmd.Process == nil {
 			return
 		}

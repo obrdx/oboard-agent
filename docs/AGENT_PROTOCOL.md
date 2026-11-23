@@ -2035,6 +2035,16 @@ tokens, `OBOARD_*` process variables, or `SSH_*`, and it does not run PAM,
 `login -f`, `su -`, or `/etc/ssh/sshrc`. `mode=minimal` skips those files and
 `-l` so a broken profile can still open a shell.
 
+On a systemd host the Agent starts the shell as its own transient unit
+(`systemd-run --pty --unit=pty-<random>.service`) so it does not inherit the
+Agent service sandbox (`NoNewPrivileges`, seccomp restrictions, `ProtectHome`,
+`PrivateTmp`, `UMask=0077`), which would break apt privilege dropping, sudo,
+su, and JIT runtimes. The unit keeps the Agent's identity without `User=` or
+PAM, receives the sanitized environment through a `0600` `EnvironmentFile`
+(never on a command line) that is removed once the shell starts, uses
+`KillMode=control-group`, and is stopped when the session closes. Hosts
+without systemd keep the direct PTY child.
+
 Control-channel messages (signed HMAC, 60s prepare TTL):
 
 Interactive timestamp validation uses the fresh Controller reference attached
