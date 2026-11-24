@@ -12,7 +12,10 @@ argv or temporary configuration files), writes only `{"exit_ip":"8.8.8.8"}` on
 success and exits nonzero with a credential-free error on failure. It validates
 protocols and public proxy DNS answers, pins resolved addresses, rejects detours,
 interface bindings and file references, and runs one isolated outbound without
-inbound listeners or live configuration changes. Only fixed HTTPS IP sources
+inbound listeners or live configuration changes. An imported WireGuard node is
+sent as a single-peer `type=wireguard` endpoint; the kernel pins its peer address
+and starts it in the isolated instance's `endpoints` list (capability
+`external_wireguard_probe_v1`). Only fixed HTTPS IP sources
 (`api.ip.sb/ip`, `icanhazip.com`) are contacted, with no redirects or environment
 proxies. The kernel budget is ten seconds; Controller kills and reaps the process
 after fifteen seconds and bounds stdout to 1 KiB. Controller serializes checks.

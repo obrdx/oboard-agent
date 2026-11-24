@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -86,6 +87,61 @@ func TestStandaloneProbeCommandRejectsUnsafeInput(t *testing.T) {
 		err := runStandaloneOutboundCheck(strings.NewReader(raw), &output)
 		if err == nil || output.Len() != 0 || strings.Contains(err.Error(), "must-not-leak") {
 			t.Fatalf("unsafe command: %v %q", err, output.String())
+		}
+	}
+}
+
+const probeWireGuardKey = "YNXtAzepDqRv9H52osJVDQnznT5AL11IUmHwhGvYPXE="
+
+func probeWireGuardEndpoint(peerAddress string, extra string) string {
+	return `{"type":"wireguard","tag":"external-probe","address":["172.16.0.2/32"],"private_key":"` + probeWireGuardKey + `","mtu":1280` + extra +
+		`,"peers":[{"address":"` + peerAddress + `","port":51820,"public_key":"` + probeWireGuardKey + `","allowed_ips":["0.0.0.0/0","::/0"]}]}`
+}
+
+func TestStandaloneProbeAcceptsOnlyASinglePeerWireGuardEndpoint(t *testing.T) {
+	decode := func(raw string) map[string]any {
+		var outbound map[string]any
+		if err := json.Unmarshal([]byte(raw), &outbound); err != nil {
+			t.Fatal(err)
+		}
+		return outbound
+	}
+	if !standaloneOutboundAllowed(decode(probeWireGuardEndpoint("162.159.192.1", ""))) {
+		t.Fatal("single-peer WireGuard endpoint rejected")
+	}
+	for _, raw := range []string{
+		probeWireGuardEndpoint("162.159.192.1", `,"detour":"direct"`),
+		probeWireGuardEndpoint("162.159.192.1", `,"system":true`),
+		probeWireGuardEndpoint("162.159.192.1", `,"server":"1.1.1.1","server_port":1`),
+		`{"type":"wireguard","tag":"external-probe","private_key":"` + probeWireGuardKey + `","peers":[]}`,
+		`{"type":"wireguard","tag":"external-probe","private_key":"` + probeWireGuardKey + `","peers":[{"address":"1.1.1.1","port":1},{"address":"1.1.1.2","port":1}]}`,
+		`{"type":"http","tag":"external-probe","server":"1.1.1.1","server_port":8080,"peers":[{"address":"1.1.1.1","port":1}]}`,
+	} {
+		if standaloneOutboundAllowed(decode(raw)) {
+			t.Fatalf("unsafe WireGuard probe accepted: %s", raw)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	newStandaloneOutboundCheckHandler(minibox.NewRuntimeClock()).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/outbounds/check", strings.NewReader(probeWireGuardEndpoint("127.0.0.1", ""))))
+	if recorder.Code != 400 {
+		t.Fatalf("private WireGuard peer accepted: status=%d", recorder.Code)
+	}
+}
+
+func TestStandaloneProbeStartsWireGuardAsEndpoint(t *testing.T) {
+	var outbound map[string]any
+	if err := json.Unmarshal([]byte(probeWireGuardEndpoint("192.0.2.1", "")), &outbound); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_, err := probeStandaloneOutbound(ctx, outbound, []string{"https://192.0.2.2/"}, minibox.NewRuntimeClock())
+	if err == nil {
+		t.Fatal("unreachable WireGuard peer returned an exit IP")
+	}
+	for _, setup := range []string{"invalid proxy configuration", "proxy initialization failed", "proxy start failed", "proxy unavailable"} {
+		if err.Error() == setup {
+			t.Fatalf("WireGuard endpoint was not built: %v", err)
 		}
 	}
 }

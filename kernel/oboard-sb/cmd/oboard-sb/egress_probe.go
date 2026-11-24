@@ -207,7 +207,7 @@ func newStandaloneOutboundCheckHandler(clock *minibox.RuntimeClock) http.Handler
 var errProbeAddress = errors.New("proxy address lookup failed or address is not public")
 
 func checkStandaloneOutbound(ctx context.Context, outbound map[string]any, clock *minibox.RuntimeClock) (string, error) {
-	host := outbound["server"].(string)
+	host := probeServer(outbound)
 	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 	if err != nil || len(addresses) == 0 {
 		return "", errProbeAddress
@@ -219,7 +219,7 @@ func checkStandaloneOutbound(ctx context.Context, outbound map[string]any, clock
 	}
 	// Pin the validated address so the isolated adapter cannot resolve it again.
 	sort.SliceStable(addresses, func(i, j int) bool { return addresses[i].Unmap().Is4() && !addresses[j].Unmap().Is4() })
-	outbound["server"] = addresses[0].Unmap().String()
+	setProbeServer(outbound, addresses[0].Unmap().String())
 	if tls, ok := outbound["tls"].(map[string]any); ok && tls["enabled"] == true && (tls["server_name"] == nil || tls["server_name"] == "") {
 		tls["server_name"] = host
 	}
@@ -228,7 +228,7 @@ func checkStandaloneOutbound(ctx context.Context, outbound map[string]any, clock
 		if i >= 2 {
 			break
 		}
-		outbound["server"] = address.Unmap().String()
+		setProbeServer(outbound, address.Unmap().String())
 		attempt, cancelAttempt := context.WithTimeout(ctx, 5*time.Second)
 		exitIP, err = probeStandaloneOutbound(attempt, outbound, outboundEgressSources, clock)
 		cancelAttempt()
@@ -245,7 +245,13 @@ func checkStandaloneOutbound(ctx context.Context, outbound map[string]any, clock
 
 func probeStandaloneOutbound(ctx context.Context, outbound map[string]any, sources []string, clock *minibox.RuntimeClock) (string, error) {
 	boxCtx := minibox.Context(ctx, clock)
-	encoded, _ := json.Marshal(map[string]any{"log": map[string]any{"disabled": true}, "outbounds": []any{outbound}})
+	list := "outbounds"
+	if outbound["type"] == "wireguard" {
+		// sing-box has no WireGuard outbound; the endpoint is looked up by the
+		// same tag through the outbound manager.
+		list = "endpoints"
+	}
+	encoded, _ := json.Marshal(map[string]any{"log": map[string]any{"disabled": true}, list: []any{outbound}})
 	opts, err := badjson.UnmarshalExtendedContext[option.Options](boxCtx, encoded)
 	if err != nil {
 		return "", errors.New("invalid proxy configuration")
@@ -265,19 +271,75 @@ func probeStandaloneOutbound(ctx context.Context, outbound map[string]any, sourc
 	return probeOutboundEgressIP(ctx, dialer, sources, clock.Now)
 }
 
+// probeWireGuardPeer returns the single peer of a WireGuard probe endpoint.
+func probeWireGuardPeer(outbound map[string]any) (map[string]any, bool) {
+	peers, ok := outbound["peers"].([]any)
+	if !ok || len(peers) != 1 {
+		return nil, false
+	}
+	peer, ok := peers[0].(map[string]any)
+	return peer, ok
+}
+
+// probeServer returns the proxy host the probe dials: the server of an
+// outbound, or the single peer address of a WireGuard endpoint.
+func probeServer(outbound map[string]any) string {
+	if outbound["type"] == "wireguard" {
+		peer, _ := probeWireGuardPeer(outbound)
+		host, _ := peer["address"].(string)
+		return host
+	}
+	host, _ := outbound["server"].(string)
+	return host
+}
+
+func setProbeServer(outbound map[string]any, address string) {
+	if outbound["type"] == "wireguard" {
+		if peer, ok := probeWireGuardPeer(outbound); ok {
+			peer["address"] = address
+		}
+		return
+	}
+	outbound["server"] = address
+}
+
 func standaloneOutboundAllowed(outbound map[string]any) bool {
+	portKey := "server_port"
 	switch outbound["type"] {
 	case "http", "socks", "vless", "hysteria2", "shadowsocks", "anytls", "snell", "mieru":
+		if _, exists := outbound["peers"]; exists {
+			return false
+		}
+	case "wireguard":
+		if _, exists := outbound["server"]; exists {
+			return false
+		}
+		for _, key := range []string{"system", "name", "listen_port", "workers"} {
+			if _, exists := outbound[key]; exists {
+				return false
+			}
+		}
+		peer, ok := probeWireGuardPeer(outbound)
+		if !ok {
+			return false
+		}
+		port, ok := peer["port"].(float64)
+		if !ok || port < 1 || port > 65535 || port != float64(int(port)) {
+			return false
+		}
+		portKey = ""
 	default:
 		return false
 	}
-	host, ok := outbound["server"].(string)
-	if !ok || strings.TrimSpace(host) == "" || outbound["tag"] != "external-probe" {
+	host := probeServer(outbound)
+	if strings.TrimSpace(host) == "" || outbound["tag"] != "external-probe" {
 		return false
 	}
-	port, ok := outbound["server_port"].(float64)
-	if !ok || port < 1 || port > 65535 || port != float64(int(port)) {
-		return false
+	if portKey != "" {
+		port, ok := outbound[portKey].(float64)
+		if !ok || port < 1 || port > 65535 || port != float64(int(port)) {
+			return false
+		}
 	}
 	for _, key := range []string{"detour", "bind_interface", "inet4_bind_address", "inet6_bind_address", "routing_mark", "domain_resolver", "netns"} {
 		if _, exists := outbound[key]; exists {
