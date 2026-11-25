@@ -2,7 +2,7 @@
 
 # OBoard Agent
 
-OBoard 节点端程序与精简代理内核 `oboard-sb`。
+OBoard 节点侧守护程序与精简代理内核 `oboard-sb`。
 
 [English](README.md) · **简体中文**
 
@@ -21,28 +21,28 @@ OBoard 节点端程序与精简代理内核 `oboard-sb`。
 
 </div>
 
-OBoard Agent 运行在代理节点上，负责对接 [OBoard 控制面板](https://github.com/obrdx/oboard)、同步配置、维护代理服务并上报节点状态。仓库内的 `kernel/oboard-sb` 同时维护基于 [sing-box](https://github.com/SagerNet/sing-box) 裁剪的精简代理内核 `oboard-sb`。
+OBoard Agent 部署于代理节点，负责与 [OBoard 控制面板](https://github.com/obrdx/oboard) 建立安全通信、校验并应用签名配置、维护网络与转发服务并上报节点状态。本仓库同时以独立模块（`kernel/oboard-sb`）维护基于 [sing-box](https://github.com/SagerNet/sing-box) 裁剪的精简代理内核 `oboard-sb`。
 
-## 核心特点
+## 核心特性
 
-- **精简内核**：`oboard-sb` 仅保留常用协议与必要功能，体积更小、内存占用更低，支持用户热更新与流量限速。
-- **小内存友好**：根据机器实际内存和容器限额自动调节资源策略，128M / 256M 小内存机器也能稳跑，不容易 OOM。
-- **一键接入**：在面板生成一次性安装命令即可上线，自动验签、断线重连并在异常时自恢复。
-- **组网齐全**：除代理内核外，支持 Realm / nftables 端口转发、透明中转、WireGuard / SSH 隧道以及独立 SSH 代理。
-- **内置探针**：支持服务器状态回报、延迟与路由测试、出口 IP / MTU / DNS 诊断和 HTTP-01 证书申请。
-- **本地工具**：自带 `obag` 命令行菜单，方便在节点本地查看状态、启停服务、看日志和排查连通性。
+- **精简代理内核**：`oboard-sb` 仅保留受支持的协议与核心组件，降低二进制体积与内存占用，并支持运行时用户热更新与流量限速。
+- **资源自适应**：依据宿主机物理内存与容器 cgroup 限额自动调整运行参数，保障 128 MiB / 256 MiB 等低内存节点的长期稳定运行，降低 OOM 风险。
+- **签名校验与自恢复**：通过面板签发的一次性令牌完成接入，内置发行包签名验证、断线自动重连以及服务异常自愈机制。
+- **完整组网能力**：统一调度代理内核、Realm / nftables 端口转发、透明中转、WireGuard / SSH 隧道及独立隔离的 SSH 代理服务。
+- **探测与诊断**：支持节点状态上报、延迟与路由探测、出口 IP / MTU / DNS 检测及 HTTP-01 证书签发。
+- **本地运维工具**：提供 `obag` 命令行工具，支持在节点本地查看服务状态、启停服务、查阅日志及测试面板连通性。
 
-## 支持能力
+## 支持范围
 
 | 分类 | 支持项 |
 | :--- | :--- |
 | **代理协议** | VLESS (TLS / Reality)、Hysteria2、AnyTLS、Shadowsocks (含 UoT)、Snell (v4 / v5 / v6)、Mieru、SOCKS5、独立 SSH (`udpgw`) |
-| **出口与组网** | 直连、链式代理、WireGuard (WARP / 外部节点)、HTTP/HTTPS 代理、VPNGate、Realm / nftables 转发、SSH 隧道 |
-| **系统平台** | Linux (`amd64` / `arm64`，`systemd` / `OpenRC`) · Windows (`amd64`) |
+| **出口与组网** | 直连、链式代理、WireGuard (WARP / 外部节点)、HTTP / HTTPS 代理、VPNGate、Realm / nftables 转发、SSH 隧道 |
+| **运行平台** | Linux (`amd64` / `arm64`，`systemd` / `OpenRC`) · Windows (`amd64`) |
 
 ## 部署
 
-推荐直接在 OBoard 面板里添加服务器并复制安装命令。也可以手动运行引导脚本：
+建议在 OBoard 控制面板中添加服务器后直接执行生成的安装命令，亦可手动运行引导脚本：
 
 ```sh
 # Linux
@@ -52,27 +52,27 @@ curl -fsSL https://raw.githubusercontent.com/obrdx/oboard-agent/main/scripts/ins
 ```
 
 ```powershell
-# Windows (管理员 PowerShell)
+# Windows（以管理员身份运行 PowerShell）
 $env:OBOARD_CONTROLLER_URL = 'https://panel.example.com'
 $env:OBOARD_ENROLL_TOKEN   = '<一次性令牌>'
 & ([scriptblock]::Create((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/obrdx/oboard-agent/main/scripts/install.ps1')))
 ```
 
-> 更新或卸载时设置 `OBOARD_ACTION=update` 或 `OBOARD_ACTION=uninstall` 即可。
+> 通过设置 `OBOARD_ACTION=update` 或 `OBOARD_ACTION=uninstall` 可执行升级或卸载操作。
 
 ## 本地管理 (`obag`)
 
 ```sh
-obag              # 打开交互菜单
-obag status       # 查看运行状态
-obag restart      # 重启 Agent 和内核
-obag logs agent   # 查看 Agent 日志（查看内核用 logs core）
-obag check        # 检测与面板的连接
+obag              # 进入交互式管理菜单
+obag status       # 查看 Agent 与内核运行状态
+obag restart      # 重启 Agent 与内核服务
+obag logs agent   # 查看 Agent 日志（查看内核日志使用 logs core）
+obag check        # 检测与控制面板的连通性
 ```
 
 ## 源码构建
 
-需要 Go 1.27+：
+需要 Go 1.27 及以上版本：
 
 ```sh
 go build -o oboard-agent ./cmd/agent
@@ -83,6 +83,6 @@ go build -o oboard-agent ./cmd/agent
 
 Copyright 2026 OBoard contributors.
 
-`oboard-sb` 基于 [sing-box](https://github.com/SagerNet/sing-box) 修改，感谢 sing-box 项目及贡献者。
+`oboard-sb` 基于 [sing-box](https://github.com/SagerNet/sing-box) 构建，谨向 sing-box 项目及贡献者致谢。
 
-`oboard-agent`（含 `kernel/oboard-sb`）基于 [GNU GPL v3](LICENSE) 开源。
+`oboard-agent`（含 `kernel/oboard-sb`）遵循 [GNU GPL v3](LICENSE) 许可证发布。

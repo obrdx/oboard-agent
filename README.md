@@ -2,7 +2,7 @@
 
 # OBoard Agent
 
-Node-side agent and slim `oboard-sb` proxy kernel for OBoard.
+Node-side daemon and slim `oboard-sb` proxy kernel for OBoard.
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -21,28 +21,28 @@ Node-side agent and slim `oboard-sb` proxy kernel for OBoard.
 
 </div>
 
-OBoard Agent runs on each proxy server to connect with the [OBoard panel](https://github.com/obrdx/oboard), apply signed configs, manage networking, and report node status. This repo also maintains `oboard-sb` (`kernel/oboard-sb`), a slim proxy kernel built on [sing-box](https://github.com/SagerNet/sing-box).
+OBoard Agent runs on managed proxy nodes to communicate with the [OBoard control panel](https://github.com/obrdx/oboard), verify and apply signed configurations, coordinate networking services, and report node status. This repository also maintains `oboard-sb` (`kernel/oboard-sb`), a slim proxy kernel derived from [sing-box](https://github.com/SagerNet/sing-box).
 
-## Highlights
+## Features
 
-- **Slim proxy kernel**: `oboard-sb` keeps only the needed protocols for a smaller binary and lower memory footprint, with hot user updates and traffic limits.
-- **Low-memory friendly**: Automatically tunes resource limits from host RAM and cgroup caps, keeping small 128–256 MiB VPS nodes stable without OOM kills.
-- **One-command setup**: Enroll with a one-time token from the panel, with signed release checks, automatic reconnects, and self-recovery.
-- **Complete networking**: Handles Realm / nftables port forwarding, transparent relays, WireGuard / SSH tunnels, and an isolated SSH proxy (`udpgw`).
-- **Built-in probes**: Reports server metrics, runs latency/route/egress/MTU/DNS checks, and handles HTTP-01 certificate challenges.
-- **Local CLI (`obag`)**: Interactive menu and commands to check status, restart services, inspect logs, and test panel connectivity.
+- **Slim proxy kernel**: `oboard-sb` includes only supported protocols and required components to minimize binary size and memory usage, supporting runtime user updates and traffic rate limiting.
+- **Adaptive resource management**: Automatically scales runtime profiles based on physical memory and cgroup limits to maintain stability and reduce OOM risk on constrained 128–256 MiB nodes.
+- **Verified delivery and recovery**: Supports one-time token enrollment, release signature verification, automatic reconnection, and watchdog self-recovery.
+- **Integrated networking**: Coordinates the proxy kernel alongside Realm / nftables port forwarding, transparent relays, WireGuard / SSH tunnels, and an isolated SSH proxy service.
+- **Probing and diagnostics**: Provides node telemetry, latency and route probes, egress IP / MTU / DNS diagnostics, and HTTP-01 certificate issuance.
+- **Local administration (`obag`)**: Includes an interactive and scriptable CLI to inspect service status, manage services, view logs, and verify panel connectivity.
 
-## What's Supported
+## Compatibility
 
 | Category | Supported |
 | :--- | :--- |
 | **Protocols** | VLESS (TLS / Reality), Hysteria2, AnyTLS, Shadowsocks (incl. UoT), Snell (v4 / v5 / v6), Mieru, SOCKS5, isolated SSH (`udpgw`) |
-| **Exits & Networking** | Direct, proxy chains, WireGuard (WARP / external), HTTP/HTTPS proxy, VPNGate, Realm / nftables forwarding, SSH tunnels |
+| **Exits & Networking** | Direct, chained proxies, WireGuard (WARP / external), HTTP / HTTPS proxy, VPNGate, Realm / nftables forwarding, SSH tunnels |
 | **Platforms** | Linux (`amd64` / `arm64`, `systemd` / `OpenRC`) · Windows (`amd64`) |
 
 ## Deployment
 
-Add a server in the OBoard panel and run the generated command, or use the bootstrap scripts directly:
+Add a server in the OBoard control panel to obtain the generated installation command, or invoke the bootstrap script directly:
 
 ```sh
 # Linux
@@ -58,31 +58,31 @@ $env:OBOARD_ENROLL_TOKEN   = '<one-time-token>'
 & ([scriptblock]::Create((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/obrdx/oboard-agent/main/scripts/install.ps1')))
 ```
 
-> Set `OBOARD_ACTION=update` or `OBOARD_ACTION=uninstall` to update or remove.
+> Set `OBOARD_ACTION=update` or `OBOARD_ACTION=uninstall` to upgrade or remove an installation.
 
-## Local CLI (`obag`)
+## Local Administration (`obag`)
 
 ```sh
-obag              # Open interactive menu
-obag status       # Check Agent and kernel status
-obag restart      # Restart Agent and kernel
+obag              # Open interactive management menu
+obag status       # Show Agent and kernel status
+obag restart      # Restart Agent and kernel services
 obag logs agent   # View Agent logs (use `logs core` for oboard-sb)
-obag check        # Test connectivity to the panel
+obag check        # Verify connectivity to the control panel
 ```
 
 ## Build from Source
 
-Requires Go 1.27+:
+Requires Go 1.27 or later:
 
 ```sh
 go build -o oboard-agent ./cmd/agent
 ./scripts/build-oboard-sb.sh
 ```
 
-## License & Thanks
+## License & Acknowledgements
 
 Copyright 2026 OBoard contributors.
 
-`oboard-sb` is based on [sing-box](https://github.com/SagerNet/sing-box). Thanks to the sing-box project and contributors.
+`oboard-sb` is derived from [sing-box](https://github.com/SagerNet/sing-box). Acknowledgements to the sing-box project and its contributors.
 
 `oboard-agent` (including `kernel/oboard-sb`) is released under the [GNU GPL v3](LICENSE).
