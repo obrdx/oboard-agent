@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagernet/sing-box/option"
 
+	boxsocks "github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/boxnet/protocol/socks"
 	mieruprotocol "github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/mieru"
 	sourceprefixprotocol "github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/sourceprefix"
 )
@@ -179,6 +180,13 @@ func TestLoadConfigAcceptsAuthenticatedSocks5InboundAndOutbound(t *testing.T) {
 			"version":"5",
 			"username":"alice",
 			"password":"secret"
+		},{
+			"type":"socks",
+			"tag":"socks-local-dns",
+			"server":"127.0.0.1",
+			"server_port":1081,
+			"version":"5",
+			"remote_dns":false
 		}],
 		"route":{"final":"socks-out"}
 	}`
@@ -193,9 +201,13 @@ func TestLoadConfigAcceptsAuthenticatedSocks5InboundAndOutbound(t *testing.T) {
 	if !ok || len(inbound.Users) != 1 || inbound.Users[0].Username != "alice" || inbound.Users[0].Password != "secret" {
 		t.Fatalf("SOCKS5 inbound options not decoded: %#v", opts.Inbounds[0].Options)
 	}
-	outbound, ok := opts.Outbounds[0].Options.(*option.SOCKSOutboundOptions)
-	if !ok || outbound.Version != "5" || outbound.Username != "alice" || outbound.Password != "secret" {
+	outbound, ok := opts.Outbounds[0].Options.(*boxsocks.OutboundOptions)
+	if !ok || outbound.Version != "5" || outbound.Username != "alice" || outbound.Password != "secret" || outbound.RemoteDNS != nil {
 		t.Fatalf("SOCKS5 outbound options not decoded: %#v", opts.Outbounds[0].Options)
+	}
+	localOutbound, ok := opts.Outbounds[1].Options.(*boxsocks.OutboundOptions)
+	if !ok || localOutbound.Version != "5" || localOutbound.RemoteDNS == nil || *localOutbound.RemoteDNS {
+		t.Fatalf("SOCKS5 local-DNS outbound options not decoded: %#v", opts.Outbounds[1].Options)
 	}
 }
 
